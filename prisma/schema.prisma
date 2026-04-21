@@ -1,0 +1,82 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  customer
+  store_owner
+  driver
+  admin
+}
+
+enum LanguagePref {
+  ar
+  en
+}
+
+enum OtpType {
+  PHONE_VERIFICATION
+  PASSWORD_RESET
+  LOGIN
+}
+
+model User {
+  user_id           Int            @id @default(autoincrement()) @map("user_id") @db.UnsignedInt
+  full_name         String         @db.VarChar(200)
+  full_name_ar      String?        @db.VarChar(200)
+  phone             String         @unique @db.VarChar(20)
+  email             String?        @unique @db.VarChar(255)
+  password_hash     String         @db.VarChar(255)
+  role              UserRole       @default(customer)
+  profile_photo_url String?        @db.VarChar(500)
+  is_active         Boolean        @default(true) @map("is_active")
+  is_verified       Boolean        @default(false) @map("is_verified")
+  language_pref     LanguagePref   @default(ar) @map("language_pref")
+  device_token      String?        @db.VarChar(500)
+  last_seen_at      DateTime?      @map("last_seen_at")
+  created_at        DateTime       @default(now()) @map("created_at")
+  updated_at        DateTime       @updatedAt @map("updated_at")
+  
+  otp_codes         OtpCode[]
+  refresh_tokens    RefreshToken[]
+
+  @@map("users")
+}
+
+model OtpCode {
+  otp_id      Int       @id @default(autoincrement()) @map("otp_id") @db.UnsignedInt
+  user_id     Int?      @map("user_id") @db.UnsignedInt
+  phone       String    @db.VarChar(20)
+  code        String    @db.VarChar(64)
+  type        OtpType
+  is_used     Boolean   @default(false) @map("is_used")
+  expires_at  DateTime  @map("expires_at")
+  created_at  DateTime  @default(now()) @map("created_at")
+  
+  user        User?     @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([phone])
+  @@index([code])
+  @@index([expires_at])
+  @@map("otp_codes")
+}
+
+model RefreshToken {
+  token_id     Int      @id @default(autoincrement()) @map("token_id") @db.UnsignedInt
+  user_id      Int      @map("user_id") @db.UnsignedInt
+  token        String   @unique @db.VarChar(500)
+  expires_at   DateTime @map("expires_at")
+  revoked_at   DateTime? @map("revoked_at")
+  created_at   DateTime @default(now()) @map("created_at")
+  
+  user         User     @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([token])
+  @@map("refresh_tokens")
+}
