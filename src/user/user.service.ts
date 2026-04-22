@@ -4,6 +4,7 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import * as bcrypt from 'bcrypt';
 import { Prisma, User, UserRole } from '@prisma/client';
 import { PrismaService } from 'prisma/prisma.service';
+import { AUTH_CONSTANTS } from '../auth/constants/auth.constants';
 
 export type UserPayload = Omit<User, 'password_hash'>;
 
@@ -36,7 +37,7 @@ export class UserService {
     return this.prisma.user.create({
       data: { // ✅ data field is explicitly present
         phone,
-        password_hash: await bcrypt.hash(password, 10),
+        password_hash: await bcrypt.hash(password, AUTH_CONSTANTS.BCRYPT_ROUNDS),
         full_name: fullName,
         full_name_ar: fullNameAr,
         email,
@@ -62,15 +63,13 @@ export class UserService {
   }
 
   async create(createUserDto: CreateUserDto): Promise<UserPayload> {
-    // console.log(' [UserService.create] Starting with:', createUserDto);
-
     try {
       const exists = await this.findByPhone(createUserDto.phone);
       if (exists) {
         throw new ConflictException('Phone number already registered');
       }
 
-      const hashedPassword = await bcrypt.hash(createUserDto.password, 10);
+      const hashedPassword = await bcrypt.hash(createUserDto.password, AUTH_CONSTANTS.BCRYPT_ROUNDS);
 
       const newUser = await this.prisma.user.create({
         data: {
@@ -86,16 +85,15 @@ export class UserService {
         },
       });
 
-      // console.log('[UserService.create] User created:', newUser.user_id);
+
       return this.mapToPublic(newUser);
 
     } catch (error: any) {
-      // console.error('[UserService.create] FULL ERROR:', {
-      //   name: error.name,
-      //   message: error.message,
-      //   code: error.code,
-      //   meta: error.meta,
-      // });
+      if (error.code === 'P2002') {
+        throw new ConflictException(
+          `${error.meta?.target?.includes('phone') ? 'Phone number' : 'Email'} already registered`
+        );
+      }
       throw error;
     }
   }
@@ -142,7 +140,7 @@ export class UserService {
     if (updateUserDto.password !== undefined) {
       updateData.password_hash = await bcrypt.hash(
         updateUserDto.password,
-        10
+        AUTH_CONSTANTS.BCRYPT_ROUNDS
       );
     }
 

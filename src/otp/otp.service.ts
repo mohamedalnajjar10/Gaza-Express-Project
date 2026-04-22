@@ -1,4 +1,4 @@
-import {
+    import {
     Injectable,
     BadRequestException,
     InternalServerErrorException,
@@ -9,6 +9,8 @@ import { generateOTP } from '../common/utils/otp-generator.util';
 import { hashOTP } from '../common/utils/crypto.util';
 import { OtpType } from '@prisma/client';
 import { PrismaService } from 'prisma/prisma.service';
+import { ConfigService } from '@nestjs/config';
+import { AUTH_CONSTANTS, AUTH_ERROR_MESSAGES } from '../auth/constants/auth.constants';
 
 @Injectable()
 export class OtpService {
@@ -17,6 +19,7 @@ export class OtpService {
     constructor(
         private prisma: PrismaService,
         private smsService: SmsService,
+        private configService: ConfigService,
     ) { }
 
     async sendOtp(
@@ -34,9 +37,9 @@ export class OtpService {
                 data: { is_used: true },
             });
 
-            const code = generateOTP();
+            const code = generateOTP(AUTH_CONSTANTS.OTP_LENGTH);
             const hashedCode = hashOTP(code);
-            const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+            const expiresAt = new Date(Date.now() + AUTH_CONSTANTS.OTP_EXPIRY_SECONDS * 1000);
 
             const otp = await this.prisma.otpCode.create({
                 data: {
@@ -86,9 +89,7 @@ export class OtpService {
             });
 
             if (!otp) {
-                throw new BadRequestException(
-                    'Verification code is incorrect or expired'
-                );
+                throw new BadRequestException(AUTH_ERROR_MESSAGES.OTP_INVALID);
             }
 
             await this.prisma.otpCode.update({
@@ -118,13 +119,11 @@ export class OtpService {
         });
 
         if (lastOtp) {
-            const ONE_MINUTE = 60 * 1000;
+            const cooldownMs = this.configService.get<number>('OTP_RESEND_COOLDOWN_MS', AUTH_CONSTANTS.OTP_RESEND_LOCK_SECONDS * 1000);
             const timeDiff = Date.now() - lastOtp.created_at.getTime();
 
-            if (timeDiff < ONE_MINUTE) {
-                const remainingSeconds = Math.ceil(
-                    (ONE_MINUTE - timeDiff) / 1000
-                );
+            if (timeDiff < cooldownMs) {
+                const remainingSeconds = Math.ceil((cooldownMs - timeDiff) / 1000);
                 throw new BadRequestException(
                     `Please wait ${remainingSeconds} seconds before requesting a new code`
                 );

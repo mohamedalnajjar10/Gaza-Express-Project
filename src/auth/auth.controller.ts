@@ -18,6 +18,8 @@ import { Public } from '../common/decorators/public.decorator';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { UserService } from 'src/user/user.service';
+import { Throttle } from '@nestjs/throttler';
+import { AUTH_CONSTANTS } from './constants/auth.constants';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -28,6 +30,7 @@ export class AuthController {
     ) { }
 
     @Public()
+    @Throttle({ default: { limit: AUTH_CONSTANTS.MAX_LOGIN_ATTEMPTS, ttl: AUTH_CONSTANTS.LOGIN_BLOCK_SECONDS * 1000 } })
     @Post('register')
     @HttpCode(HttpStatus.CREATED)
     @ApiOperation({ summary: 'Create new account - OTP will be sent' })
@@ -38,6 +41,7 @@ export class AuthController {
     }
 
     @Public()
+    @Throttle({ default: { limit: AUTH_CONSTANTS.MAX_LOGIN_ATTEMPTS, ttl: AUTH_CONSTANTS.LOGIN_BLOCK_SECONDS * 1000 } })
     @Post('login')
     @HttpCode(HttpStatus.OK)
     @ApiOperation({ summary: 'Login - without OTP' })
@@ -49,6 +53,7 @@ export class AuthController {
     }
 
     @Public()
+    @Throttle({ default: { limit: AUTH_CONSTANTS.MAX_OTP_ATTEMPTS, ttl: AUTH_CONSTANTS.OTP_BLOCK_SECONDS * 1000 } })
     @Post('verify-otp')
     @HttpCode(HttpStatus.OK)
     @ApiOperation({ summary: 'Verify OTP code' })
@@ -59,6 +64,7 @@ export class AuthController {
     }
 
     @Public()
+    @Throttle({ default: { limit: AUTH_CONSTANTS.MAX_OTP_ATTEMPTS, ttl: AUTH_CONSTANTS.OTP_BLOCK_SECONDS * 1000 } })
     @Post('resend-otp')
     @HttpCode(HttpStatus.OK)
     @ApiOperation({ summary: 'Resend OTP (after 1 minute)' })
@@ -67,6 +73,7 @@ export class AuthController {
     }
 
     @Public()
+    @Throttle({ default: { limit: AUTH_CONSTANTS.MAX_LOGIN_ATTEMPTS, ttl: AUTH_CONSTANTS.LOGIN_BLOCK_SECONDS * 1000 } })
     @Post('refresh')
     @HttpCode(HttpStatus.OK)
     @ApiOperation({ summary: 'Refresh access token' })

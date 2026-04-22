@@ -1,5 +1,6 @@
-import { IsString, IsNotEmpty } from 'class-validator';
+import { IsString, IsNotEmpty, Length } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { AUTH_CONSTANTS } from '../constants/auth.constants';
 
 export class VerifyOtpDto {
     @ApiProperty({
@@ -18,5 +19,6 @@ export class VerifyOtpDto {
     })
     @IsString()
     @IsNotEmpty()
+    @Length(AUTH_CONSTANTS.OTP_LENGTH, AUTH_CONSTANTS.OTP_LENGTH, { message: `OTP must be exactly ${AUTH_CONSTANTS.OTP_LENGTH} characters` })
     code: string;
 }

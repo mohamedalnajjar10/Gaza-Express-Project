@@ -1,5 +1,6 @@
-import { IsString, IsNotEmpty, MinLength } from 'class-validator';
+import { IsString, IsNotEmpty, MinLength, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { AUTH_CONSTANTS } from '../constants/auth.constants';
 
 export class LoginDto {
     @ApiProperty({
@@ -9,15 +10,18 @@ export class LoginDto {
     })
     @IsString()
     @IsNotEmpty()
+    @Matches(/^0(59|56)\d{7}$/, {
+        message: 'Phone number must be in format: 059XXXXXXXX or 056XXXXXXXX',
+    })
     phone: string;
 
     @ApiProperty({
-        example: 'password123',
+        example: 'P@ssw0rd123',
         description: 'Password',
         required: true,
     })
     @IsString()
     @IsNotEmpty()
-    @MinLength(6)
+    @MinLength(AUTH_CONSTANTS.MIN_PASSWORD_LENGTH)
     password: string;
 }

@@ -3,6 +3,7 @@ import {
     UnauthorizedException,
     BadRequestException,
     ForbiddenException,
+    Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -15,6 +16,7 @@ import { RegisterDto } from './dto/register.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 import { PrismaService } from 'prisma/prisma.service';
+import { AUTH_ERROR_MESSAGES } from './constants/auth.constants';
 
 export interface Tokens {
     access_token: string;
@@ -24,6 +26,7 @@ export interface Tokens {
 
 @Injectable()
 export class AuthService {
+    private readonly logger = new Logger(AuthService.name);
     constructor(
         private prisma: PrismaService,
         private userService: UserService,
@@ -52,7 +55,7 @@ export class AuthService {
                 }
 
                 throw new BadRequestException(
-                    'Phone number already registered'
+                    AUTH_ERROR_MESSAGES.MOBILE_ALREADY_REGISTERED
                 );
             }
 
@@ -77,11 +80,12 @@ export class AuthService {
             };
 
         } catch (error) {
+            this.logger.error('Error occurred while registering user', error);
             if (error.code === 'P2002') {
                 throw new BadRequestException(
-                    `${error.meta?.target?.includes('phone')
-                        ? 'Phone number'
-                        : 'Email'} already registered`
+                    error.meta?.target?.includes('phone')
+                        ? AUTH_ERROR_MESSAGES.MOBILE_ALREADY_REGISTERED
+                        : AUTH_ERROR_MESSAGES.EMAIL_ALREADY_REGISTERED
                 );
             }
             throw error;
@@ -91,7 +95,7 @@ export class AuthService {
     async login(dto: LoginDto) {
         const user = await this.userService.findByPhone(dto.phone);
         if (!user) {
-            throw new UnauthorizedException('Invalid credentials');
+            throw new UnauthorizedException(AUTH_ERROR_MESSAGES.INVALID_CREDENTIALS);
         }
 
         const isPasswordValid = await this.userService.validatePassword(
@@ -99,7 +103,7 @@ export class AuthService {
             dto.password,
         );
         if (!isPasswordValid) {
-            throw new UnauthorizedException('Invalid credentials');
+            throw new UnauthorizedException(AUTH_ERROR_MESSAGES.INVALID_CREDENTIALS);
         }
 
         if (!user.is_verified) {
@@ -125,7 +129,7 @@ export class AuthService {
 
         const user = otp.user || (await this.userService.findByPhone(dto.phone));
         if (!user) {
-            throw new BadRequestException('User not found');
+            throw new BadRequestException(AUTH_ERROR_MESSAGES.USER_NOT_FOUND);
         }
 
         if (!user.is_verified) {
@@ -146,7 +150,7 @@ export class AuthService {
     async resendOtp(phone: string) {
         const user = await this.userService.findByPhone(phone);
         if (!user) {
-            throw new BadRequestException('User not found');
+            throw new BadRequestException(AUTH_ERROR_MESSAGES.USER_NOT_FOUND);
         }
 
         const otpId = await this.otpService.resendOtp(
@@ -162,8 +166,11 @@ export class AuthService {
     }
 
     async refreshToken(refreshToken: string) {
+        const crypto = require('crypto');
+        const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+
         const storedToken = await this.prisma.refreshToken.findUnique({
-            where: { token: refreshToken },
+            where: { token: tokenHash },
             include: { user: true },
         });
 
@@ -202,36 +209,76 @@ export class AuthService {
             sub: user.user_id,
             phone: user.phone,
             role: user.role,
+            isActive: user.is_active ?? false,
         };
 
+        const jwtSecret = this.configService.get<string>('JWT_SECRET');
+        const jwtRefreshSecret = this.configService.get<string>('JWT_REFRESH_SECRET');
+
+        if (!jwtSecret || !jwtRefreshSecret || jwtSecret === jwtRefreshSecret) {
+            this.logger.error('JWT configuration error: secrets must be different and set');
+            throw new Error('JWT secrets must be different and properly configured');
+        }
+
+        const accessExpiryStr = this.configService.get<string>('JWT_EXPIRES_IN', '15m');
+        const refreshExpiryStr = this.configService.get<string>('JWT_REFRESH_EXPIRES_IN', '7d');
+
+        const accessExpirySec = this.parseExpiryToSeconds(accessExpiryStr);
+        const refreshExpirySec = this.parseExpiryToSeconds(refreshExpiryStr);
+
         const access_token = this.jwtService.sign(payload, {
-            secret: this.configService.get('JWT_SECRET'),
-            expiresIn: this.configService.get('JWT_EXPIRES_IN', '15m'),
+            secret: jwtSecret,
+            expiresIn: accessExpirySec,
         });
 
         const refresh_token = this.jwtService.sign(payload, {
-            secret: this.configService.get('JWT_REFRESH_SECRET'),
-            expiresIn: this.configService.get('JWT_REFRESH_EXPIRES_IN', '7d'),
+            secret: jwtRefreshSecret,
+            expiresIn: refreshExpirySec,
         });
 
         return {
             access_token,
             refresh_token,
-            expires_in: 900,
+            expires_in: accessExpirySec,
         };
     }
 
-    private async saveRefreshToken(userId: number, token: string): Promise<void> {
-        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-
-        const createData = {
-            user_id: userId,
-            token,
-            expires_at: expiresAt,
+    private parseExpiryToSeconds(expiry: string): number {
+        const units: Record<string, number> = {
+            s: 1,
+            m: 60,
+            h: 3600,
+            d: 86400,
+            w: 604800,
         };
 
+        if (/^\d+$/.test(expiry)) {
+            return parseInt(expiry, 10);
+        }
+
+        const match = expiry.match(/^(\d+)([smhdw])$/i);
+        if (!match) {
+            this.logger.warn(`Invalid expiry format: ${expiry}. Falling back to 15m.`);
+            return 900;
+        }
+
+        const [, value, unit] = match;
+        return parseInt(value, 10) * (units[unit.toLowerCase()] || 1);
+    }
+
+    private async saveRefreshToken(userId: number, token: string): Promise<void> {
+        const refreshTokenExpiry = this.configService.get<string>('JWT_REFRESH_EXPIRES_IN', '7d');
+        const expiresAt = new Date(Date.now() + this.parseExpiryToSeconds(refreshTokenExpiry) * 1000);
+
+        const crypto = require('crypto');
+        const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
         await this.prisma.refreshToken.create({
-            data: createData,
+            data: {
+                user_id: userId,
+                token: tokenHash,
+                expires_at: expiresAt,
+            },
         });
     }
 
