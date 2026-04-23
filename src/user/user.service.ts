@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, ConflictException, BadRequestException }
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import * as bcrypt from 'bcrypt';
+import * as crypto from 'crypto';
 import { Prisma, User, UserRole } from '@prisma/client';
 import { PrismaService } from 'prisma/prisma.service';
 import { AUTH_CONSTANTS } from '../auth/constants/auth.constants';
@@ -52,13 +53,6 @@ export class UserService {
     return this.prisma.user.update({
       where: { user_id: userId },
       data: { is_verified: true },
-    });
-  }
-
-  async updateLastLogin(userId: number): Promise<void> {
-    await this.prisma.user.update({
-      where: { user_id: userId },
-      data: { last_seen_at: new Date() },
     });
   }
 
@@ -186,5 +180,63 @@ export class UserService {
   private mapToPublic(user: User): UserPayload {
     const { password_hash, ...result } = user;
     return result;
+  }
+
+  async findByGoogleId(googleId: string) {
+    return this.prisma.user.findUnique({
+      where: { googleId },
+    });
+  }
+
+  async findByEmail(email: string) {
+    return this.prisma.user.findUnique({
+      where: { email },
+    });
+  }
+
+  async createGoogleUser(data: {
+    googleId: string;
+    email: string;
+    full_name: string;
+    profile_photo_url?: string;
+  }) {
+    const phoneHash = crypto
+      .createHash('md5')
+      .update(data.googleId)
+      .digest('hex')
+      .substring(0, 16);
+
+    return this.prisma.user.create({
+      data: {
+        googleId: data.googleId,
+        email: data.email.toLowerCase(),
+        full_name: data.full_name,
+        profile_photo_url: data.profile_photo_url,
+        provider: 'google',
+        phone: `g_${phoneHash}`,
+        password_hash: '',
+        is_verified: true,
+        is_active: true,
+      },
+    });
+  }
+
+  async linkGoogleAccount(user_id: number, googleId: string, profile_photo_url?: string) {
+    return this.prisma.user.update({
+      where: { user_id },
+      data: {
+        googleId,
+        provider: 'google',
+        profile_photo_url: profile_photo_url || null,
+      },
+    });
+  }
+
+  async updateLastLogin(user_id: number): Promise<void> {
+    await this.prisma.user.update({
+      where: { user_id },
+      data: { last_seen_at: new Date() },
+    }
+    );
   }
 }

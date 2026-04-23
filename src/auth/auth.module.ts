@@ -7,6 +7,8 @@ import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { UserModule } from '../user/user.module';
 import { OtpModule } from '../otp/otp.module';
+import { GoogleStrategy } from './strategies/google.strategy';
+import { GoogleAuthGuard } from 'src/common/guards/google-auth.guard';
 
 
 @Module({
@@ -26,7 +28,7 @@ import { OtpModule } from '../otp/otp.module';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, GoogleStrategy, GoogleAuthGuard],
   exports: [AuthService],
 })
 export class AuthModule { }

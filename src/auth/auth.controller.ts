@@ -8,7 +8,11 @@ import {
     Request,
     UseGuards,
     UnauthorizedException,
+    Res,
+    Logger,
 } from '@nestjs/common';
+import type { Response } from 'express';
+import { ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -20,13 +24,17 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { UserService } from 'src/user/user.service';
 import { Throttle } from '@nestjs/throttler';
 import { AUTH_CONSTANTS } from './constants/auth.constants';
+import { GoogleAuthGuard } from 'src/common/guards/google-auth.guard';
 
 @ApiTags('Authentication')
 @Controller('auth')
 export class AuthController {
+    private readonly logger = new Logger(AuthController.name);
+
     constructor(
         private authService: AuthService,
-        private userService: UserService
+        private userService: UserService,
+        private configService: ConfigService,
     ) { }
 
     @Public()
@@ -102,5 +110,33 @@ export class AuthController {
     @ApiBearerAuth()
     async getProfile(@Request() req) {
         return this.userService.findOnePublic(req.user.user_id);
+    }
+
+    // Google OAuth Endpoints
+    @Get('google')
+    @Public()
+    async googleAuth() {
+    }
+
+    @Get('google/callback')
+    @Public()
+    @UseGuards(GoogleAuthGuard)
+    async googleAuthRedirect(
+        @Request() req: any,
+        @Res() res: Response,
+    ) {
+        try {
+            const { access_token, user } = await this.authService.handleGoogleLogin(req.user);
+
+            const frontendUrl = this.configService.get<string>('FRONTEND_URL');
+
+            return res.redirect(`${frontendUrl}/auth/success?token=${access_token}`);
+
+        } catch (error) {
+            this.logger.error('Google auth callback failed:', error);
+
+            const frontendUrl = this.configService.get<string>('FRONTEND_URL');
+            return res.redirect(`${frontendUrl}/auth/error?message=Authentication_failed`);
+        }
     }
 }

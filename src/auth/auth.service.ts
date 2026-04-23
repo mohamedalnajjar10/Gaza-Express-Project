@@ -292,4 +292,54 @@ export class AuthService {
             data: updateData,
         });
     }
+
+    async handleGoogleLogin(googleUserData: {
+        googleId: string;                    
+        email: string;
+        full_name?: string;
+        profile_photo_url?: string;       
+        accessToken?: string;
+    }): Promise<{ access_token: string; user: any }> {
+
+        let user = await this.userService.findByGoogleId(googleUserData.googleId);
+
+        if (!user) {
+            user = await this.userService.findByEmail(googleUserData.email);
+
+            if (user && !user.googleId) {
+                user = await this.userService.linkGoogleAccount(
+                    user.user_id,
+                    googleUserData.googleId,
+                    googleUserData.profile_photo_url,
+                );
+            }
+        }
+
+        if (!user) {
+            user = await this.userService.createGoogleUser({
+                googleId: googleUserData.googleId,
+                email: googleUserData.email,
+                full_name: googleUserData.full_name || 'Google User',
+                profile_photo_url: googleUserData.profile_photo_url,
+            });
+        }
+
+        await this.userService.updateLastLogin(user.user_id);
+
+        const tokens = await this.generateTokens(user);
+        await this.saveRefreshToken(user.user_id, tokens.refresh_token);
+
+        return {
+            access_token: tokens.access_token,
+            user: {
+                user_id: user.user_id,
+                email: user.email,
+                full_name: user.full_name,
+                profile_photo_url: user.profile_photo_url,
+                provider: user.provider,
+                phone: user.phone,
+                role: user.role,
+            },
+        };
+    }
 }
