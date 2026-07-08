@@ -17,6 +17,7 @@ import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 import { PrismaService } from 'prisma/prisma.service';
 import { AUTH_ERROR_MESSAGES } from './constants/auth.constants';
+import * as crypto from 'crypto';
 
 export interface Tokens {
     access_token: string;
@@ -65,6 +66,7 @@ export class AuthService {
                 dto.full_name,
                 dto.full_name_ar,
                 dto.email,
+                dto.role
             );
 
             const otpId = await this.otpService.sendOtp(
@@ -117,6 +119,14 @@ export class AuthService {
         return {
             tokens,
             message: 'Login successful',
+            user: {
+                id: user.user_id,
+                phone: user.phone,
+                full_name: user.full_name,
+                full_name_ar: user.full_name_ar,
+                role: user.role,
+                is_verified: user.is_verified,
+            }
         };
     }
 
@@ -166,7 +176,6 @@ export class AuthService {
     }
 
     async refreshToken(refreshToken: string) {
-        const crypto = require('crypto');
         const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
 
         const storedToken = await this.prisma.refreshToken.findUnique({
@@ -189,16 +198,14 @@ export class AuthService {
     }
 
     async logout(userId: number, refreshToken: string) {
-        const updateData = {
-            revoked_at: new Date(),
-        };
+        const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
 
         await this.prisma.refreshToken.updateMany({
             where: {
                 user_id: userId,
-                token: refreshToken,
+                token: tokenHash,
             },
-            data: updateData,
+            data: { revoked_at: new Date() },
         });
 
         return { message: 'Logout successful' };
@@ -270,7 +277,6 @@ export class AuthService {
         const refreshTokenExpiry = this.configService.get<string>('JWT_REFRESH_EXPIRES_IN', '7d');
         const expiresAt = new Date(Date.now() + this.parseExpiryToSeconds(refreshTokenExpiry) * 1000);
 
-        const crypto = require('crypto');
         const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
         await this.prisma.refreshToken.create({
@@ -294,10 +300,10 @@ export class AuthService {
     }
 
     async handleGoogleLogin(googleUserData: {
-        googleId: string;                    
+        googleId: string;
         email: string;
         full_name?: string;
-        profile_photo_url?: string;       
+        profile_photo_url?: string;
         accessToken?: string;
     }): Promise<{ access_token: string; user: any }> {
 

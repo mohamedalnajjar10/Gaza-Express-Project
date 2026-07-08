@@ -29,6 +29,6 @@ import { GoogleAuthGuard } from 'src/common/guards/google-auth.guard';
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, GoogleStrategy, GoogleAuthGuard],
-  exports: [AuthService],
+  exports: [AuthService, JwtModule],
 })
 export class AuthModule { }

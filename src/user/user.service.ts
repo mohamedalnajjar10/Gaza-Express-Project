@@ -31,18 +31,19 @@ export class UserService {
     fullName: string,
     fullNameAr?: string,
     email?: string,
+    role?: UserRole,
   ): Promise<User> {
     const exists = await this.findByPhone(phone);
     if (exists) throw new ConflictException('Phone number already registered');
 
     return this.prisma.user.create({
-      data: { // ✅ data field is explicitly present
+      data: {
         phone,
         password_hash: await bcrypt.hash(password, AUTH_CONSTANTS.BCRYPT_ROUNDS),
         full_name: fullName,
         full_name_ar: fullNameAr,
         email,
-        role: UserRole.customer,
+        role: role ?? UserRole.customer,
         is_active: true,
         is_verified: false,
       },

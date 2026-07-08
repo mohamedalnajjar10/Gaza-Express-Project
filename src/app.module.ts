@@ -7,6 +7,14 @@ import { SmsModule } from './sms/sms.module';
 import { PrismaModule } from 'prisma/prisma.module';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
+import { CategoriesModule } from './categories/categories.module';
+import { SubCategoryModule } from './subcategory/subcategory.module';
+import { StoreCategoriesModule } from './store-categories/store-categories.module';
+import { ProductCategoriesModule } from './product-categories/product-categories.module';
+import { StoresModule } from './stores/stores.module';
+import { ProductsModule } from './products/products.module';
+import { FavoritesModule } from './favorites/favorites.module';
+import { ReviewsModule } from './reviews/reviews.module';
 
 @Module({
   imports: [
@@ -40,6 +48,14 @@ import { AppController } from './app.controller';
     UserModule,
     OtpModule,
     SmsModule,
+    CategoriesModule,
+    SubCategoryModule,
+    StoreCategoriesModule,
+    ProductCategoriesModule,
+    StoresModule,
+    ProductsModule,
+    FavoritesModule,
+    ReviewsModule,
   ],
   controllers: [AppController],
 })

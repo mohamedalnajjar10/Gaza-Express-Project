@@ -5,9 +5,11 @@ import {
     IsOptional,
     IsEmail,
     Matches,
+    IsEnum,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AUTH_CONSTANTS } from '../constants/auth.constants';
+import { UserRole } from '@prisma/client';
 
 export class RegisterDto {
     @ApiProperty({
@@ -48,4 +50,14 @@ export class RegisterDto {
     @IsEmail({}, { message: 'Invalid email format' })
     @IsOptional()
     email?: string;
+
+    @ApiProperty({
+        example: 'customer',
+        description: 'User role: customer, store_owner, driver, admin',
+        required: false,
+        enum: UserRole,
+    })
+    @IsEnum(UserRole, { message: 'Invalid role specified' })
+    @IsOptional()
+    role?: UserRole = UserRole.customer;
 }
