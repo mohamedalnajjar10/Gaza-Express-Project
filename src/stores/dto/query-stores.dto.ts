@@ -1,4 +1,4 @@
-import { IsOptional, IsString, IsNumber, IsEnum } from 'class-validator';
+import { IsOptional, IsString, IsNumber, IsEnum, IsInt, Min, Max, MaxLength } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
@@ -25,6 +25,7 @@ export class QueryStoresDto {
     @ApiPropertyOptional({ description: 'البحث بالاسم' })
     @IsString()
     @IsOptional()
+    @MaxLength(80)
     search?: string;
 
     @ApiPropertyOptional({
@@ -40,11 +41,17 @@ export class QueryStoresDto {
     @Type(() => Number)
     @IsNumber()
     @IsOptional()
+    @IsInt()
+    @Min(1)
+    @Max(200)
     page?: number;
 
     @ApiPropertyOptional({ description: 'عدد النتائج', default: 20 })
     @Type(() => Number)
     @IsNumber()
     @IsOptional()
+    @IsInt()
+    @Min(1)
+    @Max(100)
     limit?: number;
 }

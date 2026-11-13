@@ -1,6 +1,6 @@
 import {
     IsString, IsNumber, IsOptional, IsBoolean, IsEnum,
-    IsDecimal, IsInt, Min, Max, IsUrl, MinLength
+    IsLatitude, IsLongitude, IsDecimal, IsInt, Min, Max, IsUrl, MinLength
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
@@ -69,13 +69,13 @@ export class CreateStoreDto {
 
     @ApiPropertyOptional({ example: 31.5017 })
     @Type(() => Number)
-    @IsDecimal()
+    @IsLatitude()
     @IsOptional()
     latitude?: number;
 
     @ApiPropertyOptional({ example: 34.4668 })
     @Type(() => Number)
-    @IsDecimal()
+    @IsLongitude()
     @IsOptional()
     longitude?: number;
 
@@ -93,6 +93,7 @@ export class CreateStoreDto {
     @Type(() => Number)
     @IsNumber()
     @IsOptional()
+    @Min(0)
     minOrderAmount?: number;
 
     @ApiPropertyOptional({ example: 30, default: 30 })
@@ -106,6 +107,7 @@ export class CreateStoreDto {
     @Type(() => Number)
     @IsNumber()
     @IsOptional()
+    @Min(0)
     deliveryRangeKm?: number;
 
     @ApiPropertyOptional({ default: true })

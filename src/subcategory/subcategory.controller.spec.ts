@@ -1,17 +1,18 @@
+import { PrismaService } from 'prisma/prisma.service';
 import { Test, TestingModule } from '@nestjs/testing';
-import { SubcategoryController } from './subcategory.controller';
-import { SubcategoryService } from './subcategory.service';
+import { SubCategoryController } from './subcategory.controller';
+import { SubCategoryService } from './subcategory.service';
 
-describe('SubcategoryController', () => {
-  let controller: SubcategoryController;
+describe('SubCategoryController', () => {
+  let controller: SubCategoryController;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
-      controllers: [SubcategoryController],
-      providers: [SubcategoryService],
+      controllers: [SubCategoryController],
+      providers: [SubCategoryService, { provide: PrismaService, useValue: {} }],
     }).compile();
 
-    controller = module.get<SubcategoryController>(SubcategoryController);
+    controller = module.get<SubCategoryController>(SubCategoryController);
   });
 
   it('should be defined', () => {

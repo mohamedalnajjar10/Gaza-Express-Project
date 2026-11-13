@@ -1,3 +1,4 @@
+import { PageDto, pageWindow } from 'src/common/dto/page.dto';
 import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
@@ -16,10 +17,10 @@ export class CategoryService {
     }
   }
 
-  async findAll() {
+  async findAll(page = new PageDto()) {
     return this.prisma.category.findMany({
-      where: { isActive: true },
-      orderBy: { createdAt: 'desc' },
+      ...pageWindow(page), where: { isActive: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       include: { _count: { select: { subCategories: true } } }
     });
   }
@@ -27,7 +28,7 @@ export class CategoryService {
   async findOne(id: number) {
     const category = await this.prisma.category.findUnique({
       where: { id },
-      include: { subCategories: { where: { isActive: true } } }
+      include: { subCategories: { where: { isActive: true }, orderBy: { id: 'asc' }, take: 25 } }
     });
     if (!category) throw new NotFoundException('Category not found');
     return category;

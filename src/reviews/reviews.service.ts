@@ -1,3 +1,5 @@
+import { PageDto, pageWindow } from 'src/common/dto/page.dto';
+import { CatalogCache } from 'src/infrastructure/catalog-cache';
 import {
   Injectable,
   NotFoundException,
@@ -9,7 +11,7 @@ import { CreateReviewDto } from './dto/create-review.dto';
 
 @Injectable()
 export class ReviewsService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService, private readonly cache: CatalogCache) {}
 
   async create(userId: number, dto: CreateReviewDto) {
     const store = await this.prisma.store.findUnique({
@@ -43,11 +45,12 @@ export class ReviewsService {
     });
 
     await this.updateStoreRating(dto.storeId);
+    await this.cache.invalidate();
 
     return review;
   }
 
-  async findByStore(storeId: number) {
+  async findByStore(storeId: number, page = new PageDto()) {
     const store = await this.prisma.store.findUnique({
       where: { storeId },
     });
@@ -57,13 +60,14 @@ export class ReviewsService {
     }
 
     return this.prisma.review.findMany({
+      ...pageWindow(page),
       where: { storeId },
       include: {
         user: {
           select: { full_name: true, full_name_ar: true },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { reviewId: 'desc' }],
     });
   }
 
@@ -87,6 +91,7 @@ export class ReviewsService {
     });
 
     await this.updateStoreRating(storeId);
+    await this.cache.invalidate();
 
     return { message: 'Review deleted successfully' };
   }

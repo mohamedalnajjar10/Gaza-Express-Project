@@ -1,3 +1,4 @@
+import { RedisStorage } from '../infrastructure/redis.module';
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
@@ -21,6 +22,7 @@ const mockAuthService = {
   refreshToken: jest.fn(),
   logout: jest.fn(),
   handleGoogleLogin: jest.fn(),
+  issueGoogleSession: jest.fn(),
 };
 
 const mockUserService = {
@@ -40,6 +42,7 @@ const mockTokens = {
 };
 
 const mockConfigService = {
+  getOrThrow: jest.fn().mockReturnValue('http://localhost:3000'),
   get: jest.fn(),
 };
 
@@ -52,6 +55,8 @@ const mockUserPublic = {
 };
 
 // Test Suite
+const redis = { saveGoogleHandoff: jest.fn(), consumeGoogleHandoff: jest.fn() };
+
 describe('AuthController', () => {
   let authController: AuthController;
 
@@ -63,6 +68,7 @@ describe('AuthController', () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AuthController],
       providers: [
+        { provide: RedisStorage, useValue: redis },
         { provide: AuthService, useValue: mockAuthService },
         { provide: UserService, useValue: mockUserService },
         { provide: ConfigService, useValue: mockConfigService },
@@ -274,34 +280,26 @@ describe('AuthController', () => {
     });
   });
 
-  // googleAuthRedirect
-  describe('googleAuthRedirect()', () => {
-    it('[SUCCESS] should handle login and redirect to success URL', async () => {
-      const mockReq = { user: { email: 'test@gmail.com' } };
-      const mockRes = { redirect: jest.fn() };
-      const expectedTokens = { access_token: 'mock_google_token', user: mockUserPublic };
-      
-      mockAuthService.handleGoogleLogin.mockResolvedValue(expectedTokens);
-      mockConfigService.get.mockReturnValue('http://localhost:3000');
-
-      await authController.googleAuthRedirect(mockReq as any, mockRes as any);
-
-      expect(mockAuthService.handleGoogleLogin).toHaveBeenCalledWith(mockReq.user);
-      expect(mockConfigService.get).toHaveBeenCalledWith('FRONTEND_URL');
-      expect(mockRes.redirect).toHaveBeenCalledWith(`http://localhost:3000/auth/success?token=mock_google_token`);
+  describe('Google OAuth handoff', () => {
+    it('redirects without credentials and creates a short-lived HttpOnly cookie', async () => {
+      const req = { user: { email: 'test@gmail.com' }, path: '/api/v1/auth/google/callback' };
+      const res = { redirect: jest.fn(), cookie: jest.fn(), setHeader: jest.fn() };
+      mockAuthService.handleGoogleLogin.mockResolvedValue(1);
+      await authController.googleAuthRedirect(req as any, res as any);
+      expect(res.redirect).toHaveBeenCalledWith('http://localhost:3000/auth/success');
+      expect(res.cookie).toHaveBeenCalledWith('wasla_google_exchange', expect.stringMatching(/^[a-f0-9]{64}$/), expect.objectContaining({ httpOnly: true, maxAge: 60000, path: '/api/v1/auth/google/exchange' }));
+      expect(redis.saveGoogleHandoff).toHaveBeenCalledWith(expect.stringMatching(/^[a-f0-9]{64}$/), 1);
     });
 
-    it('[ERROR] should redirect to error URL on failure', async () => {
-      const mockReq = { user: { email: 'test@gmail.com' } };
-      const mockRes = { redirect: jest.fn() };
-      
-      mockAuthService.handleGoogleLogin.mockRejectedValue(new Error('Auth failed'));
-      mockConfigService.get.mockReturnValue('http://localhost:3000');
-
-      await authController.googleAuthRedirect(mockReq as any, mockRes as any);
-
-      expect(mockConfigService.get).toHaveBeenCalledWith('FRONTEND_URL');
-      expect(mockRes.redirect).toHaveBeenCalledWith(`http://localhost:3000/auth/error?message=Authentication_failed`);
+    it('rejects handoff reuse and cross-origin exchanges', async () => {
+      mockConfigService.get.mockReturnValue('true');
+      const res = { setHeader: jest.fn(), clearCookie: jest.fn() };
+      const request = (origin: string) => ({ headers: { origin, cookie: `wasla_google_exchange=${'a'.repeat(64)}` }, path: '/api/v1/auth/google/exchange' });
+      await expect(authController.exchangeGoogleSession(request('https://other.invalid') as any, res as any)).rejects.toMatchObject({ status: 401 });
+      redis.consumeGoogleHandoff.mockResolvedValueOnce('1').mockResolvedValueOnce(null);
+      mockAuthService.issueGoogleSession.mockResolvedValue({ tokens: {} });
+      await expect(authController.exchangeGoogleSession(request('http://localhost:3000') as any, res as any)).resolves.toEqual({ tokens: {} });
+      await expect(authController.exchangeGoogleSession(request('http://localhost:3000') as any, res as any)).rejects.toMatchObject({ status: 401 });
     });
   });
 });

@@ -1,3 +1,4 @@
+import { ResendOtpDto } from './dto/resend-otp.dto';
 import {
     Controller,
     Post,
@@ -10,8 +11,13 @@ import {
     UnauthorizedException,
     Res,
     Logger,
+    NotFoundException,
+    ServiceUnavailableException,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request as ExpressRequest, Response } from 'express';
+import { createHash, randomBytes } from 'node:crypto';
+import { RedisStorage } from '../infrastructure/redis.module';
+import type { GoogleIdentity } from './strategies/google.strategy';
 import { ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
@@ -24,7 +30,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { UserService } from 'src/user/user.service';
 import { Throttle } from '@nestjs/throttler';
 import { AUTH_CONSTANTS } from './constants/auth.constants';
-import { GoogleAuthGuard } from 'src/common/guards/google-auth.guard';
+import { googleExchangeCookie, GoogleAuthGuard, oauthCookie, readOAuthCookie } from 'src/common/guards/google-auth.guard';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -35,6 +41,7 @@ export class AuthController {
         private authService: AuthService,
         private userService: UserService,
         private configService: ConfigService,
+        private redis: RedisStorage,
     ) { }
 
     @Public()
@@ -76,7 +83,7 @@ export class AuthController {
     @Post('resend-otp')
     @HttpCode(HttpStatus.OK)
     @ApiOperation({ summary: 'Resend OTP (after 1 minute)' })
-    async resendOtp(@Body() resendDto: { phone: string }) {
+    async resendOtp(@Body() resendDto: ResendOtpDto) {
         return this.authService.resendOtp(resendDto.phone);
     }
 
@@ -113,6 +120,7 @@ export class AuthController {
     }
 
     // Google OAuth Endpoints
+    @UseGuards(GoogleAuthGuard)
     @Get('google')
     @Public()
     async googleAuth() {
@@ -121,22 +129,39 @@ export class AuthController {
     @Get('google/callback')
     @Public()
     @UseGuards(GoogleAuthGuard)
-    async googleAuthRedirect(
-        @Request() req: any,
-        @Res() res: Response,
-    ) {
+    async googleAuthRedirect(@Request() req: ExpressRequest & { user: GoogleIdentity }, @Res() res: Response) {
+        const frontendUrl = this.configService.getOrThrow<string>('FRONTEND_URL');
+        res.setHeader('Cache-Control', 'no-store');
         try {
-            const { access_token, user } = await this.authService.handleGoogleLogin(req.user);
-
-            const frontendUrl = this.configService.get<string>('FRONTEND_URL');
-
-            return res.redirect(`${frontendUrl}/auth/success?token=${access_token}`);
-
-        } catch (error) {
-            this.logger.error('Google auth callback failed:', error);
-
-            const frontendUrl = this.configService.get<string>('FRONTEND_URL');
-            return res.redirect(`${frontendUrl}/auth/error?message=Authentication_failed`);
+            const userId = await this.authService.handleGoogleLogin(req.user);
+            const handoff = randomBytes(32).toString('hex');
+            await this.redis.saveGoogleHandoff(createHash('sha256').update(handoff).digest('hex'), userId);
+            const cookie = oauthCookie(this.configService, googleExchangeCookie, req.path.replace(/callback$/, 'exchange'));
+            res.cookie(cookie.name, handoff, { ...cookie.options, maxAge: 60000 });
+            return res.redirect(new URL('/auth/success', frontendUrl).toString());
+        } catch {
+            this.logger.warn('Google auth callback failed');
+            return res.redirect(new URL('/auth/error?message=Authentication_failed', frontendUrl).toString());
         }
+    }
+
+    @Post('google/exchange')
+    @HttpCode(200)
+    @Public()
+    async exchangeGoogleSession(@Request() req: ExpressRequest, @Res({ passthrough: true }) res: Response) {
+        if (this.configService.get('GOOGLE_AUTH_ENABLED') !== 'true') throw new NotFoundException();
+        if (req.headers.origin !== new URL(this.configService.getOrThrow<string>('FRONTEND_URL')).origin) {
+            throw new UnauthorizedException('Invalid origin');
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        const cookie = oauthCookie(this.configService, googleExchangeCookie, req.path);
+        res.clearCookie(cookie.name, cookie.options);
+        const handoff = readOAuthCookie(req, cookie.name);
+        if (!handoff) throw new UnauthorizedException('Google session expired');
+        let userId: string | null;
+        try { userId = await this.redis.consumeGoogleHandoff(createHash('sha256').update(handoff).digest('hex')); }
+        catch { throw new ServiceUnavailableException('Session storage unavailable'); }
+        if (!userId) throw new UnauthorizedException('Google session expired');
+        return this.authService.issueGoogleSession(Number(userId));
     }
 }

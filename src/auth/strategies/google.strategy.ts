@@ -1,38 +1,20 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
-import { Strategy, VerifyCallback } from 'passport-google-oauth20';
+import { Strategy, type Profile } from 'passport-google-oauth20';
 import { ConfigService } from '@nestjs/config';
+
+export type GoogleIdentity = { googleId: string; email: string; full_name: string; profile_photo_url?: string };
 
 @Injectable()
 export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
-    constructor(private configService: ConfigService) {
-        super({
-            clientID: configService.getOrThrow<string>('GOOGLE_CLIENT_ID'),
-            clientSecret: configService.getOrThrow<string>('GOOGLE_CLIENT_SECRET'),
-            callbackURL: configService.getOrThrow<string>('GOOGLE_CALLBACK_URL'),
-            scope: ['email', 'profile'],
-            passReqToCallback: true,
-        });
-    }
+  constructor(config: ConfigService) {
+    super({ clientID: config.getOrThrow('GOOGLE_CLIENT_ID'), clientSecret: config.getOrThrow('GOOGLE_CLIENT_SECRET'),
+      callbackURL: config.getOrThrow('GOOGLE_CALLBACK_URL'), scope: ['email', 'profile'], });
+  }
 
-    async validate(
-        _req: Request,
-        accessToken: string,
-        _refreshToken: string,
-        profile: any,
-        done: VerifyCallback,
-    ): Promise<any> {
-        const { id: googleId, emails, name, photos } = profile;
-
-        const userData = {
-            googleId,                                  
-            email: emails?.[0]?.value?.toLowerCase(),
-            full_name: `${name?.givenName || ''} ${name?.familyName || ''}`.trim(),
-            profile_photo_url: photos?.[0]?.value,      
-            provider: 'google' as const,
-            accessToken,
-        };
-
-        done(null, userData);
-    }
+  validate(_accessToken: string, _refreshToken: string, profile: Profile): GoogleIdentity {
+    const email = profile.emails?.[0];
+    if (!profile.id || !email?.value || email.verified !== true) throw new UnauthorizedException('Verified Google email required');
+    return { googleId: profile.id, email: email.value.toLowerCase(), full_name: (profile.displayName || 'Google User').slice(0, 100), profile_photo_url: profile.photos?.[0]?.value };
+  }
 }

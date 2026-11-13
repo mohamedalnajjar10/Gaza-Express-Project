@@ -2,6 +2,7 @@
     Injectable,
     BadRequestException,
     InternalServerErrorException,
+    ServiceUnavailableException,
     Logger
 } from '@nestjs/common';
 import { SmsService } from '../sms/sms.service';
@@ -28,41 +29,37 @@ export class OtpService {
         userId?: number
     ): Promise<number> {
         try {
-            await this.prisma.otpCode.updateMany({
-                where: {
-                    phone,
-                    type,
-                    is_used: false
-                },
-                data: { is_used: true },
-            });
-
             const code = generateOTP(AUTH_CONSTANTS.OTP_LENGTH);
-            const hashedCode = hashOTP(code);
-            const expiresAt = new Date(Date.now() + AUTH_CONSTANTS.OTP_EXPIRY_SECONDS * 1000);
-
-            const otp = await this.prisma.otpCode.create({
-                data: {
-                    phone,
-                    code: hashedCode,
-                    type,
+            const otp = await this.prisma.$transaction(async tx => {
+                // Lock the existing account: concurrent issuers across replicas serialize here.
+                const users = await tx.$queryRaw<Array<{ user_id: number }>>`
+                    SELECT user_id FROM users WHERE phone = ${phone} FOR UPDATE`;
+                if (!users.length) throw new BadRequestException('Account not found');
+                if (userId !== undefined && users[0].user_id !== userId) throw new BadRequestException('Account mismatch');
+                const latest = await tx.otpCode.findFirst({ where: { phone, type }, orderBy: { created_at: 'desc' } });
+                const cooldown = Number(this.configService.get('OTP_RESEND_COOLDOWN_MS', 60000));
+                if (latest && Date.now() - latest.created_at.getTime() < cooldown) {
+                    throw new BadRequestException('Please wait before requesting a new code');
+                }
+                await tx.otpCode.updateMany({ where: { phone, type, is_used: false }, data: { is_used: true } });
+                const created = await tx.otpCode.create({ data: {
+                    phone, type, code: hashOTP(code),
                     ...(userId && { user_id: userId }),
-                    expires_at: expiresAt,
+                    expires_at: new Date(Date.now() + AUTH_CONSTANTS.OTP_EXPIRY_SECONDS * 1000),
                     is_used: false,
-                },
+                } });
+                await this.smsService.enqueueVerification(tx, created.otp_id, code, created.expires_at);
+                return created;
             });
 
-            await this.smsService.sendVerificationCode(phone, code);
-
-            this.logger.log(`OTP sent successfully to ${phone}`);
+            this.logger.log('Verification delivery requested');
             return otp.otp_id;
 
         } catch (error) {
-            this.logger.error(`Failed to send OTP to ${phone}`, error.stack);
-
-            if (error instanceof BadRequestException) {
+            if (error instanceof BadRequestException || error instanceof ServiceUnavailableException) {
                 throw error;
             }
+            this.logger.error('Verification delivery failed');
             throw new InternalServerErrorException(
                 'Failed to send verification code'
             );
@@ -92,18 +89,19 @@ export class OtpService {
                 throw new BadRequestException(AUTH_ERROR_MESSAGES.OTP_INVALID);
             }
 
-            await this.prisma.otpCode.update({
-                where: { otp_id: otp.otp_id },
+            const consumed = await this.prisma.otpCode.updateMany({
+                where: { otp_id: otp.otp_id, is_used: false, expires_at: { gt: new Date() } },
                 data: { is_used: true },
             });
 
+            if (consumed.count !== 1) throw new BadRequestException(AUTH_ERROR_MESSAGES.OTP_INVALID);
             return otp;
 
         } catch (error) {
             if (error instanceof BadRequestException) {
                 throw error;
             }
-            this.logger.error(`Failed to verify OTP for ${phone}`, error.stack);
+            this.logger.error('Verification failed');
             throw new InternalServerErrorException('Failed to verify the code');
         }
     }

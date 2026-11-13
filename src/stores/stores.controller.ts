@@ -1,3 +1,8 @@
+import { RolesGuard } from '../common/guards/roles.guard';
+import { Roles } from '../common/decorators/roles.decorator';
+import { StoreModerationDto, StoreModerationPageDto } from './dto/store-moderation.dto';
+import { PageDto } from 'src/common/dto/page.dto';
+import { UpdateStoreDto } from './dto/update-store.dto';
 import {
   Controller, Get, Post, Body, Patch, Param, Delete, Query,
   ParseIntPipe, DefaultValuePipe, UseGuards, Request
@@ -29,8 +34,24 @@ export class StoresController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get my stores' })
-  findMyStores(@Request() req) {
-    return this.service.findMyStores(req.user.user_id);
+  findMyStores(@Request() req, @Query() page: PageDto) {
+    return this.service.findMyStores(req.user.user_id, page);
+  }
+
+  @Get('moderation')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  @ApiBearerAuth()
+  moderationQueue(@Query() query: StoreModerationPageDto) {
+    return this.service.moderationQueue(query);
+  }
+
+  @Patch(':id/moderation')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  @ApiBearerAuth()
+  moderate(@Request() req, @Param('id', ParseIntPipe) id: number, @Body() dto: StoreModerationDto) {
+    return this.service.moderate(req.user.user_id, id, dto);
   }
 
   @Get(':id')
@@ -51,23 +72,23 @@ export class StoresController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Update store' })
-  update(@Param('id', ParseIntPipe) id: number, @Body() dto: Partial<CreateStoreDto>) {
-    return this.service.update(id, dto);
+  update(@Request() req, @Param('id', ParseIntPipe) id: number, @Body() dto: UpdateStoreDto) {
+    return this.service.update(req.user.user_id, id, dto);
   }
 
   @Patch(':id/toggle-status')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Toggle store open/close status' })
-  toggleStatus(@Param('id', ParseIntPipe) id: number) {
-    return this.service.toggleStatus(id);
+  toggleStatus(@Request() req, @Param('id', ParseIntPipe) id: number) {
+    return this.service.toggleStatus(req.user.user_id, id);
   }
 
   @Delete(':id')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Delete store' })
-  delete(@Param('id', ParseIntPipe) id: number) {
-    return this.service.delete(id);
+  delete(@Request() req, @Param('id', ParseIntPipe) id: number) {
+    return this.service.delete(req.user.user_id, id);
   }
 }

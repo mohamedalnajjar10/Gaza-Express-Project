@@ -1,3 +1,6 @@
+import { PageDto } from 'src/common/dto/page.dto';
+import { ProductListDto, ProductSearchDto } from './dto/product-list.dto';
+import { UpdateProductDto } from './dto/update-product.dto';
 import {
   Controller, Get, Post, Body, Patch, Param, Delete,
   Query, ParseIntPipe, UseGuards, Request, ForbiddenException
@@ -17,9 +20,9 @@ export class ProductsController {
   @ApiOperation({ summary: 'Get products by store' })
   findByStore(
     @Param('storeId', ParseIntPipe) storeId: number,
-    @Query('availableOnly') availableOnly: string = 'true'
+    @Query() query: ProductListDto
   ) {
-    return this.service.findByStore(storeId, availableOnly === 'true');
+    return this.service.findByStore(storeId, query.availableOnly !== 'false', query);
   }
 
   @Get('search/:storeId')
@@ -27,9 +30,15 @@ export class ProductsController {
   @ApiOperation({ summary: 'Search products in store' })
   search(
     @Param('storeId', ParseIntPipe) storeId: number,
-    @Query('q') query: string
+    @Query() query: ProductSearchDto
   ) {
-    return this.service.search(storeId, query);
+    return this.service.search(storeId, query.q, query);
+  }
+
+  @Get(':id/options')
+  @UseGuards(JwtAuthGuard)
+  options(@Param('id', ParseIntPipe) id: number, @Query() page: PageDto) {
+    return this.service.findOptions(id, page);
   }
 
   @Get(':id')
@@ -51,7 +60,7 @@ export class ProductsController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Update product (owner only)' })
-  update(@Request() req, @Param('id', ParseIntPipe) id: number, @Body() dto: Partial<CreateProductDto>) {
+  update(@Request() req, @Param('id', ParseIntPipe) id: number, @Body() dto: UpdateProductDto) {
     return this.service.update(req.user.user_id, id, dto);
   }
 

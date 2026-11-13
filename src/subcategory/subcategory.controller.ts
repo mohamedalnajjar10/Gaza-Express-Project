@@ -1,3 +1,4 @@
+import { CategoryPageDto } from 'src/common/dto/page.dto';
 import { Controller, Get, Post, Body, Patch, Param, Delete, Query, UseGuards, ParseIntPipe } from '@nestjs/common';
 import { SubCategoryService } from './subcategory.service';
 import { CreateSubCategoryDto } from './dto/create-subcategory.dto';
@@ -26,8 +27,8 @@ export class SubCategoryController {
   @ApiQuery({ name: 'categoryId', required: false, type: Number, description: 'Optional category ID to filter by' })
   @ApiOperation({ summary: 'Get subcategories (optionally filtered by categoryId)' })
   @ApiResponse({ status: 200, description: 'List of subcategories.' })
-  findAll(@Query('categoryId') categoryId?: number) {
-    return this.service.findAll(categoryId ? +categoryId : undefined);
+  findAll(@Query() page: CategoryPageDto) {
+    return this.service.findAll(page.categoryId, page);
   }
 
   @Get(':id')

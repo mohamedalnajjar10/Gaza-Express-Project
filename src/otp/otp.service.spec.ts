@@ -33,6 +33,8 @@ const mockOtpRecord = {
 
 // Mocks
 const mockPrismaService = {
+  $transaction: jest.fn(),
+  $queryRaw: jest.fn(),
   otpCode: {
     create: jest.fn(),
     update: jest.fn(),
@@ -42,7 +44,7 @@ const mockPrismaService = {
 };
 
 const mockSmsService = {
-  sendVerificationCode: jest.fn(),
+  enqueueVerification: jest.fn(),
   sendMessage: jest.fn(),
 };
 
@@ -69,7 +71,10 @@ describe('OtpService', () => {
     }).compile();
 
     otpService = module.get<OtpService>(OtpService);
-    jest.clearAllMocks();
+    jest.resetAllMocks();
+    mockPrismaService.$transaction.mockImplementation(fn => fn(mockPrismaService));
+    mockPrismaService.$queryRaw.mockResolvedValue([{ user_id: 1 }]);
+    mockPrismaService.otpCode.findFirst.mockResolvedValue(null);
 
     jest.spyOn(otpGenerator, 'generateOTP').mockReturnValue(MOCK_CODE);
     jest.spyOn(cryptoUtil, 'hashOTP').mockReturnValue(MOCK_HASHED_CODE);
@@ -83,7 +88,7 @@ describe('OtpService', () => {
     beforeEach(() => {
       mockPrismaService.otpCode.updateMany.mockResolvedValue({ count: 0 });
       mockPrismaService.otpCode.create.mockResolvedValue(mockOtpRecord);
-      mockSmsService.sendVerificationCode.mockResolvedValue(undefined);
+      mockSmsService.enqueueVerification.mockResolvedValue(undefined);
     });
 
     it('[SUCCESS] should invalidate old OTPs before creating new one', async () => {
@@ -117,12 +122,14 @@ describe('OtpService', () => {
       expect(result).toBe(MOCK_OTP_ID);
     });
 
-    it('[SUCCESS] should send plain code via SMS not hashed', async () => {
+    it('[SUCCESS] should enqueue the SMS with its OTP inside the transaction', async () => {
       await otpService.sendOtp(MOCK_PHONE, OtpType.PHONE_VERIFICATION, 1);
 
-      expect(mockSmsService.sendVerificationCode).toHaveBeenCalledWith(
-        MOCK_PHONE,
+      expect(mockSmsService.enqueueVerification).toHaveBeenCalledWith(
+        mockPrismaService,
+        MOCK_OTP_ID,
         MOCK_CODE,
+        mockOtpRecord.expires_at,
       );
     });
 
@@ -140,6 +147,7 @@ describe('OtpService', () => {
     });
 
     it('[SUCCESS] should include user_id when provided', async () => {
+      mockPrismaService.$queryRaw.mockResolvedValue([{ user_id: 5 }]);
       await otpService.sendOtp(MOCK_PHONE, OtpType.PHONE_VERIFICATION, 5);
 
       const createArg = mockPrismaService.otpCode.create.mock.calls[0][0];
@@ -167,8 +175,8 @@ describe('OtpService', () => {
       expect(createArg.data.type).toBe(OtpType.PASSWORD_RESET);
     });
 
-    it('[ERROR] should throw InternalServerErrorException if SMS fails', async () => {
-      mockSmsService.sendVerificationCode.mockRejectedValue(
+    it('[ERROR] should throw InternalServerErrorException if outbox persistence fails', async () => {
+      mockSmsService.enqueueVerification.mockRejectedValue(
         new Error('SMS provider down'),
       );
 
@@ -216,10 +224,7 @@ describe('OtpService', () => {
   describe('verifyOtp()', () => {
     beforeEach(() => {
       mockPrismaService.otpCode.findFirst.mockResolvedValue(mockOtpRecord);
-      mockPrismaService.otpCode.update.mockResolvedValue({
-        ...mockOtpRecord,
-        is_used: true,
-      });
+      mockPrismaService.otpCode.updateMany.mockResolvedValue({ count: 1 });
     });
 
     it('[SUCCESS] should return OTP record on valid verification', async () => {
@@ -239,8 +244,8 @@ describe('OtpService', () => {
         OtpType.PHONE_VERIFICATION,
       );
 
-      expect(mockPrismaService.otpCode.update).toHaveBeenCalledWith({
-        where: { otp_id: MOCK_OTP_ID },
+      expect(mockPrismaService.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { otp_id: MOCK_OTP_ID, is_used: false, expires_at: { gt: expect.any(Date) } },
         data: { is_used: true },
       });
     });
@@ -351,7 +356,7 @@ describe('OtpService', () => {
     beforeEach(() => {
       mockPrismaService.otpCode.updateMany.mockResolvedValue({ count: 1 });
       mockPrismaService.otpCode.create.mockResolvedValue(mockOtpRecord);
-      mockSmsService.sendVerificationCode.mockResolvedValue(undefined);
+      mockSmsService.enqueueVerification.mockResolvedValue(undefined);
     });
 
     it('[SUCCESS] should send OTP immediately if no previous OTP exists', async () => {
@@ -363,7 +368,7 @@ describe('OtpService', () => {
       );
 
       expect(result).toBe(MOCK_OTP_ID);
-      expect(mockSmsService.sendVerificationCode).toHaveBeenCalled();
+      expect(mockSmsService.enqueueVerification).toHaveBeenCalled();
     });
 
     it('[SUCCESS] should resend OTP if cooldown period has passed', async () => {
@@ -469,6 +474,7 @@ describe('OtpService', () => {
     });
 
     it('[SUCCESS] should call sendOtp with userId when provided', async () => {
+      mockPrismaService.$queryRaw.mockResolvedValue([{ user_id: 7 }]);
       mockPrismaService.otpCode.findFirst.mockResolvedValue(null);
 
       await otpService.resendOtp(MOCK_PHONE, OtpType.PHONE_VERIFICATION, 7);

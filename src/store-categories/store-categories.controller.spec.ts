@@ -1,3 +1,5 @@
+import { CatalogCache } from 'src/infrastructure/catalog-cache';
+import { PrismaService } from 'prisma/prisma.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { StoreCategoriesController } from './store-categories.controller';
 import { StoreCategoriesService } from './store-categories.service';
@@ -8,7 +10,7 @@ describe('StoreCategoriesController', () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [StoreCategoriesController],
-      providers: [StoreCategoriesService],
+      providers: [StoreCategoriesService, { provide: PrismaService, useValue: {} }, { provide: CatalogCache, useValue: {} }],
     }).compile();
 
     controller = module.get<StoreCategoriesController>(StoreCategoriesController);

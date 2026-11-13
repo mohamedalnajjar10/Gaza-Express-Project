@@ -1,0 +1,11 @@
+services:
+  api:
+    environment:
+      NODE_ENV: test
+      LOAD_TEST_MODE: '1'
+      JWT_SECRET: ${LOAD_JWT_SECRET:?Set LOAD_JWT_SECRET for the benchmark}
+      JWT_REFRESH_SECRET: ${LOAD_JWT_REFRESH_SECRET:?Set LOAD_JWT_REFRESH_SECRET for the benchmark}
+      SMS_PROVIDER: disabled
+      CATALOG_CACHE_URL: ${LOAD_CACHE_URL-redis://catalog-cache:6379}
+    volumes:
+      - ./test/load:/app/load:ro

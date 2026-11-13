@@ -1,152 +1,47 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { SmsService } from './sms.service';
 import { ConfigService } from '@nestjs/config';
+import { TwilioSmsProvider, createSmsProvider } from './sms.provider';
+import { SmsService } from './sms.service';
+import type { Prisma } from '@prisma/client';
 
-const mockConfigService = {
-  get: jest.fn(),
-};
+const config = () => new ConfigService({
+  NODE_ENV: 'test', SMS_PROVIDER: 'fake', SMS_OUTBOX_KEY: 'a'.repeat(64),
+  TWILIO_ACCOUNT_SID: `AC${'1'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'test-token',
+  TWILIO_MESSAGING_SERVICE_SID: `MG${'2'.repeat(32)}`,
+});
 
-describe('SmsService', () => {
-  let smsService: SmsService;
-  let consoleLogSpy: jest.SpyInstance;
-  let consoleErrorSpy: jest.SpyInstance;
+describe('SMS outbox and provider', () => {
+  afterEach(() => jest.restoreAllMocks());
 
-  beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        SmsService,
-        { provide: ConfigService, useValue: mockConfigService },
-      ],
-    }).compile();
-
-    smsService = module.get<SmsService>(SmsService);
-    jest.clearAllMocks();
-
-    consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => { });
-    consoleErrorSpy = jest
-      .spyOn(console, 'error')
-      .mockImplementation(() => { });
+  it('stores encrypted OTPs and rejects ciphertext transplanted to another job', async () => {
+    const service = new SmsService(config());
+    const create = jest.fn(async ({ data }) => data);
+    const tx = { smsJob: { create } } as unknown as Prisma.TransactionClient;
+    const job = await service.enqueueVerification(tx, 1, '123456', new Date(Date.now() + 60_000));
+    expect(job.payload).not.toBe('123456');
+    expect(service.decrypt(job)).toBe('123456');
+    expect(() => service.decrypt({ ...job, otpId: 2 })).toThrow();
   });
 
-  afterEach(() => {
-    consoleLogSpy.mockRestore();
-    consoleErrorSpy.mockRestore();
+  it('fake provider accepts a request without writing secrets to stdout', async () => {
+    const log = jest.spyOn(console, 'log');
+    const provider = createSmsProvider(config());
+    await expect(provider.send('0591234567', 'Secret code 123456', new Date())).resolves.toMatchObject({ status: 'accepted' });
+    expect(log).not.toHaveBeenCalled();
   });
 
-  // sendVerificationCode
-  describe('sendVerificationCode()', () => {
-    it('[SUCCESS] should resolve without throwing', async () => {
-      await expect(
-        smsService.sendVerificationCode('0592149436', '123456'),
-      ).resolves.not.toThrow();
-    });
-
-    it('[SUCCESS] should return void (undefined)', async () => {
-      const result = await smsService.sendVerificationCode(
-        '0592149436',
-        '123456',
-      );
-
-      expect(result).toBeUndefined();
-    });
-
-    it('[SUCCESS] should print code to console in development', async () => {
-      await smsService.sendVerificationCode('0592149436', '123456');
-
-      expect(consoleLogSpy).toHaveBeenCalled();
-    });
-
-    it('[SUCCESS] should log phone number in console output', async () => {
-      await smsService.sendVerificationCode('0592149436', '123456');
-
-      const allCalls = consoleLogSpy.mock.calls.flat().join(' ');
-      expect(allCalls).toContain('0592149436');
-    });
-
-    it('[SUCCESS] should log the OTP code in console output', async () => {
-      await smsService.sendVerificationCode('0592149436', '123456');
-
-      const allCalls = consoleLogSpy.mock.calls.flat().join(' ');
-      expect(allCalls).toContain('123456');
-    });
-
-    it('[SUCCESS] should handle different phone formats', async () => {
-      await expect(
-        smsService.sendVerificationCode('+970592149436', '654321'),
-      ).resolves.not.toThrow();
-    });
-
-    it('[SUCCESS] should handle 4-digit codes', async () => {
-      await expect(
-        smsService.sendVerificationCode('0592149436', '1234'),
-      ).resolves.not.toThrow();
-    });
-
-    it('[SUCCESS] should handle 8-digit codes', async () => {
-      await expect(
-        smsService.sendVerificationCode('0592149436', '12345678'),
-      ).resolves.not.toThrow();
-    });
-
-    it('[SUCCESS] should be callable multiple times', async () => {
-      await smsService.sendVerificationCode('0592149436', '111111');
-      await smsService.sendVerificationCode('0592149436', '222222');
-      await smsService.sendVerificationCode('0592149436', '333333');
-
-      const allOutput = consoleLogSpy.mock.calls.flat().join(' ');
-      expect(allOutput).toContain('111111');
-      expect(allOutput).toContain('222222');
-      expect(allOutput).toContain('333333');
-      expect(consoleLogSpy.mock.calls.length).toBeGreaterThan(0);
-    });
-
-    it('[SUCCESS] should log correct number of times per call', async () => {
-      await smsService.sendVerificationCode('0592149436', '000000');
-      const callsPerInvocation = consoleLogSpy.mock.calls.length;
-
-      expect(callsPerInvocation).toBeGreaterThan(0);
-
-      consoleLogSpy.mockClear();
-      await smsService.sendVerificationCode('0592149436', '111111');
-      await smsService.sendVerificationCode('0592149436', '222222');
-      await smsService.sendVerificationCode('0592149436', '333333');
-
-      expect(consoleLogSpy.mock.calls.length).toBe(callsPerInvocation * 3);
-    });
+  it('normalizes a local phone number and submits a bounded Twilio request', async () => {
+    const sid = `SM${'3'.repeat(32)}`;
+    const fetch = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify({ sid, status: 'accepted' }), { status: 201 }));
+    const provider = new TwilioSmsProvider(config());
+    await expect(provider.send('0591234567', '123456', new Date(Date.now() + 60000))).resolves.toEqual({ status: 'accepted', providerId: sid });
+    expect(fetch).toHaveBeenCalledWith(expect.stringMatching(/^https:\/\/api\.twilio\.com\//), expect.objectContaining({ method: 'POST', signal: expect.any(AbortSignal) }));
+    const body = fetch.mock.calls[0][1]?.body as URLSearchParams;
+    expect(body.get('To')).toBe('+970591234567');
+    expect(Number(body.get('ValidityPeriod'))).toBeLessThanOrEqual(60);
   });
 
-  // sendMessage
-  describe('sendMessage()', () => {
-    it('[SUCCESS] should resolve without throwing', async () => {
-      await expect(
-        smsService.sendMessage('0592149436', 'Hello'),
-      ).resolves.not.toThrow();
-    });
-
-    it('[SUCCESS] should return void (undefined)', async () => {
-      const result = await smsService.sendMessage('0592149436', 'Hello');
-
-      expect(result).toBeUndefined();
-    });
-
-    it('[SUCCESS] should handle empty message', async () => {
-      await expect(
-        smsService.sendMessage('0592149436', ''),
-      ).resolves.not.toThrow();
-    });
-
-    it('[SUCCESS] should handle long message', async () => {
-      const longMessage = 'A'.repeat(500);
-
-      await expect(
-        smsService.sendMessage('0592149436', longMessage),
-      ).resolves.not.toThrow();
-    });
-
-    it('[SUCCESS] should handle Arabic message', async () => {
-      await expect(
-        smsService.sendMessage('0592149436', 'مرحبا بك في غزة إكسبرس'),
-      ).resolves.not.toThrow();
-    });
+  it.each([[429, 'retry'], [400, 'failed'], [503, 'unknown']] as const)('classifies HTTP %s as %s', async (status, expected) => {
+    jest.spyOn(global, 'fetch').mockResolvedValue(new Response(null, { status }));
+    await expect(new TwilioSmsProvider(config()).send('+970591234567', '123456', new Date())).resolves.toMatchObject({ status: expected });
   });
 });

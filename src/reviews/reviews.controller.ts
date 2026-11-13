@@ -1,5 +1,6 @@
+import { PageDto } from 'src/common/dto/page.dto';
 import {
-  Controller, Get, Post, Delete, Body, Param, ParseIntPipe,
+  Controller, Get, Post, Delete, Body, Query, Param, ParseIntPipe,
   UseGuards, Request, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ReviewsService } from './reviews.service';
@@ -23,8 +24,8 @@ export class ReviewsController {
 
   @Get('store/:storeId')
   @ApiOperation({ summary: 'Get all reviews for a store' })
-  findByStore(@Param('storeId', ParseIntPipe) storeId: number) {
-    return this.service.findByStore(storeId);
+  findByStore(@Param('storeId', ParseIntPipe) storeId: number, @Query() page: PageDto) {
+    return this.service.findByStore(storeId, page);
   }
 
   @Delete(':id')

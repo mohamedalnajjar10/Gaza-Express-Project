@@ -1,3 +1,7 @@
+import { NotificationsModule } from './notifications/notifications.module';
+import { OrdersModule } from './orders/orders.module';
+import { validateEnvironment } from './config/environment';
+import { RedisModule, RedisStorage } from './infrastructure/redis.module';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthModule } from './auth/auth.module';
@@ -5,7 +9,8 @@ import { UserModule } from './user/user.module';
 import { OtpModule } from './otp/otp.module';
 import { SmsModule } from './sms/sms.module';
 import { PrismaModule } from 'prisma/prisma.module';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { CategoriesModule } from './categories/categories.module';
 import { SubCategoryModule } from './subcategory/subcategory.module';
@@ -21,7 +26,8 @@ import { ReviewsModule } from './reviews/reviews.module';
     // Configuration
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: '.env',
+      validate: validateEnvironment,
+      envFilePath: process.env.ENV_FILE || (process.env.NODE_ENV === 'test' ? '.env.test' : process.env.NODE_ENV === 'production' ? '.env.production' : '.env'),
       ignoreEnvFile: false,
     }),
 
@@ -30,13 +36,15 @@ import { ReviewsModule } from './reviews/reviews.module';
 
     // Rate limiting
     ThrottlerModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
+      imports: [ConfigModule, RedisModule],
+      inject: [ConfigService, RedisStorage],
+      useFactory: (config: ConfigService, storage: RedisStorage) => ({
+        storage,
+        skipIf: () => config.get('LOAD_TEST_MODE') === '1',
         throttlers: [
           {
-            ttl: config.get<number>('RATE_LIMIT_TTL', 60),
-            limit: config.get<number>('RATE_LIMIT_MAX_REQUESTS', 10),
+            ttl: Number(config.get('RATE_LIMIT_TTL', 60000)),
+            limit: Number(config.get('RATE_LIMIT_MAX_REQUESTS', 100)),
           },
         ],
       }),
@@ -56,7 +64,10 @@ import { ReviewsModule } from './reviews/reviews.module';
     ProductsModule,
     FavoritesModule,
     ReviewsModule,
+    OrdersModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule { }

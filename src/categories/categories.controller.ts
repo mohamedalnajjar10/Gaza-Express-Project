@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, UseGuards, ParseIntPipe } from '@nestjs/common';
+import { PageDto } from 'src/common/dto/page.dto';
+import { Controller, Query, Get, Post, Body, Patch, Param, Delete, UseGuards, ParseIntPipe } from '@nestjs/common';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { JwtAuthGuard } from 'src/common/guards/jwt-auth.guard';
@@ -25,7 +26,7 @@ export class CategoryController {
   @Get()
   @ApiOperation({ summary: 'Get all active categories' })
   @ApiResponse({ status: 200, description: 'List of all categories.' })
-  findAll() { return this.service.findAll(); }
+  findAll(@Query() page?: PageDto) { return this.service.findAll(page); }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get category by ID with subcategories' })

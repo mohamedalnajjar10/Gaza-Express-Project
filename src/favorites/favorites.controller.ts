@@ -1,3 +1,4 @@
+import { PageDto } from 'src/common/dto/page.dto';
 import {
   Controller, Get, Post, Delete, Param, ParseIntPipe,
   UseGuards, Request, Query
@@ -16,8 +17,8 @@ export class FavoritesController {
   // Store Favorites
   @Get('stores')
   @ApiOperation({ summary: 'Get my favorite stores' })
-  getMyFavoriteStores(@Request() req) {
-    return this.service.getMyFavoriteStores(req.user.user_id);
+  getMyFavoriteStores(@Request() req, @Query() page: PageDto) {
+    return this.service.getMyFavoriteStores(req.user.user_id, page);
   }
 
   @Post('stores/:storeId')
@@ -41,8 +42,8 @@ export class FavoritesController {
   // Product Favorites
   @Get('products')
   @ApiOperation({ summary: 'Get my favorite products' })
-  getMyFavoriteProducts(@Request() req) {
-    return this.service.getMyFavoriteProducts(req.user.user_id);
+  getMyFavoriteProducts(@Request() req, @Query() page: PageDto) {
+    return this.service.getMyFavoriteProducts(req.user.user_id, page);
   }
 
   @Post('products/:productId')

@@ -1,3 +1,4 @@
+import { PageDto, pageWindow } from 'src/common/dto/page.dto';
 import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
 import { CreateSubCategoryDto } from './dto/create-subcategory.dto';
 import { UpdateSubCategoryDto } from './dto/update-subcategory.dto';
@@ -19,11 +20,12 @@ export class SubCategoryService {
     }
   }
 
-  async findAll(categoryId?: number) {
+  async findAll(categoryId?: number, page = new PageDto()) {
     return this.prisma.subCategory.findMany({
+      ...pageWindow(page),
       where: { isActive: true, categoryId },
       include: { category: { select: { id: true, name: true, nameAr: true } } },
-      orderBy: { createdAt: 'desc' }
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
   }
 

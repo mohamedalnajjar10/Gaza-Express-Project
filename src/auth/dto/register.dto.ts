@@ -6,6 +6,7 @@ import {
     IsEmail,
     Matches,
     IsEnum,
+    IsIn,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AUTH_CONSTANTS } from '../constants/auth.constants';
@@ -57,6 +58,7 @@ export class RegisterDto {
         required: false,
         enum: UserRole,
     })
+    @IsIn([UserRole.customer, UserRole.store_owner, UserRole.driver])
     @IsEnum(UserRole, { message: 'Invalid role specified' })
     @IsOptional()
     role?: UserRole = UserRole.customer;

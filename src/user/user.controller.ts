@@ -1,5 +1,7 @@
+import { PageDto } from 'src/common/dto/page.dto';
+import { RolesGuard } from '../common/guards/roles.guard';
 import {
-  Controller, Get, Post, Body, Patch, Param, Delete,
+  Controller, Query, Get, Post, Body, Patch, Param, Delete,
   UseGuards, ParseIntPipe,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
@@ -12,7 +14,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 
 @ApiTags('Admin: Users Management')
 @Controller('users')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('admin')
 @ApiBearerAuth()
 export class UserController {
@@ -26,8 +28,8 @@ export class UserController {
 
   @Get()
   @ApiOperation({ summary: 'Get all users' })
-  findAll() {
-    return this.userService.findAll();
+  findAll(@Query() page?: PageDto) {
+    return this.userService.findAll(page);
   }
 
   @Get(':id')

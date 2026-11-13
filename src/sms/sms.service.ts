@@ -1,33 +1,36 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Prisma } from '@prisma/client';
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'crypto';
 
 @Injectable()
 export class SmsService {
-    private readonly logger = new Logger(SmsService.name);
+  constructor(private readonly config: ConfigService) {}
 
-    constructor(private configService: ConfigService) { }
-
-    async sendVerificationCode(phone: string, code: string): Promise<void> {
-        const message = `Gaza Express - Verification code is: ${code}\nValid for 5 minutes. Do not share it with anyone.`;
-
-        try {
-            this.logger.log(`📱 Sending SMS to ${phone}: ${code}`);
-
-            console.log(`\n🔐 ========================================`);
-            console.log(`📱 SMS Verification Code for ${phone}:`);
-            console.log(`🔢 Code: ${code}`);
-            console.log(`⏰ Valid for 5 minutes`);
-            console.log(`🔐 ========================================\n`);
-
-
-
-        } catch (error) {
-            this.logger.error('Failed to send SMS', error);
-            throw error;
-        }
+  async enqueueVerification(tx: Prisma.TransactionClient, otpId: number, code: string, expiresAt: Date) {
+    if (!['twilio', 'fake'].includes(this.config.get('SMS_PROVIDER', 'disabled'))) {
+      throw new ServiceUnavailableException('SMS delivery is not configured');
     }
+    const id = randomUUID();
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.key(), iv);
+    cipher.setAAD(Buffer.from(`${id}:${otpId}`));
+    const ciphertext = Buffer.concat([cipher.update(code, 'utf8'), cipher.final()]);
+    const payload = Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64');
+    return tx.smsJob.create({ data: { id, otpId, payload, expiresAt } });
+  }
 
-    async sendMessage(phone: string, message: string): Promise<void> {
-        this.logger.log(`Sending SMS to ${phone}: ${message}`);
-    }
+  decrypt(job: { id: string; otpId: number; payload: string | null }) {
+    const data = Buffer.from(job.payload ?? '', 'base64');
+    const decipher = createDecipheriv('aes-256-gcm', this.key(), data.subarray(0, 12));
+    decipher.setAAD(Buffer.from(`${job.id}:${job.otpId}`));
+    decipher.setAuthTag(data.subarray(12, 28));
+    return Buffer.concat([decipher.update(data.subarray(28)), decipher.final()]).toString('utf8');
+  }
+
+  private key() {
+    const value = this.config.get<string>('SMS_OUTBOX_KEY');
+    if (!value || !/^[a-f0-9]{64}$/i.test(value)) throw new ServiceUnavailableException('SMS queue encryption is not configured');
+    return Buffer.from(value, 'hex');
+  }
 }

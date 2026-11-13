@@ -1,13 +1,20 @@
+import { PrismaService } from 'prisma/prisma.service';
+import { RedisStorage } from './infrastructure/redis.module';
 import { Test, TestingModule } from '@nestjs/testing';
 import { AppController } from './app.controller';
 import { HttpStatus } from '@nestjs/common';
 
 describe('AppController', () => {
   let controller: AppController;
+  const mysql = { $queryRaw: jest.fn() };
+  const redis = { ping: jest.fn() };
 
   beforeEach(async () => {
+    mysql.$queryRaw.mockReset().mockResolvedValue([{ ready: 1 }]);
+    redis.ping.mockReset().mockResolvedValue(undefined);
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AppController],
+      providers: [{ provide: PrismaService, useValue: mysql }, { provide: RedisStorage, useValue: redis }],
     }).compile();
 
     controller = module.get<AppController>(AppController);
@@ -120,30 +127,26 @@ describe('AppController', () => {
   });
 
   describe('readinessCheck', () => {
-    it('should return readiness status', () => {
-      const result = controller.readinessCheck();
-
-      expect(result).toHaveProperty('status');
-      expect(result.status).toBe('ready');
+    it('confirms both MySQL and Redis', async () => {
+      await expect(controller.readinessCheck()).resolves.toEqual({ status: 'ready' });
+      expect(mysql.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(redis.ping).toHaveBeenCalledTimes(1);
     });
 
-    it('should return only status field', () => {
-      const result = controller.readinessCheck();
-
-      expect(Object.keys(result)).toEqual(['status']);
+    it('rejects readiness when Redis is down', async () => {
+      redis.ping.mockRejectedValueOnce(new Error('connection failed'));
+      await expect(controller.readinessCheck()).rejects.toMatchObject({ status: 503 });
     });
 
-    it('should return consistent response', () => {
-      const result1 = controller.readinessCheck();
-      const result2 = controller.readinessCheck();
-
-      expect(result1).toEqual(result2);
+    it('rejects readiness when MySQL is down', async () => {
+      mysql.$queryRaw.mockRejectedValueOnce(new Error('connection failed'));
+      await expect(controller.readinessCheck()).rejects.toMatchObject({ status: 503 });
     });
 
-    it('should return simple object structure', () => {
-      const result = controller.readinessCheck();
-
-      expect(result).toEqual({ status: 'ready' });
+    it('coalesces concurrent dependency probes', async () => {
+      await Promise.all([controller.readinessCheck(), controller.readinessCheck()]);
+      expect(mysql.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(redis.ping).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -202,13 +205,6 @@ describe('AppController', () => {
       expect(parsed).toEqual(result);
     });
 
-    it('readinessCheck response should be JSON serializable', () => {
-      const result = controller.readinessCheck();
-      const jsonString = JSON.stringify(result);
-      const parsed = JSON.parse(jsonString);
-
-      expect(parsed).toEqual(result);
-    });
   });
 
   describe('Edge Cases', () => {
@@ -225,15 +221,6 @@ describe('AppController', () => {
       });
     });
 
-    it('should handle multiple concurrent readiness checks', () => {
-      const results = Array.from({ length: 100 }, () =>
-        controller.readinessCheck(),
-      );
-
-      results.forEach((result) => {
-        expect(result).toEqual({ status: 'ready' });
-      });
-    });
 
     it('healthCheck should work in different environments', () => {
       const environments = ['development', 'production', 'test', 'staging'];
@@ -258,12 +245,5 @@ describe('AppController', () => {
       expect(duration).toBeLessThan(100); // Should complete in less than 100ms
     });
 
-    it('readinessCheck should respond quickly', () => {
-      const start = Date.now();
-      controller.readinessCheck();
-      const duration = Date.now() - start;
-
-      expect(duration).toBeLessThan(10); // Should be almost instant
-    });
   });
 });

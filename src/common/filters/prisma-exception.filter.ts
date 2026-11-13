@@ -30,10 +30,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         }
 
         else if (exception instanceof Prisma.PrismaClientKnownRequestError) {
-            this.logger.error(
-                `Prisma Error: ${exception.code}`,
-                exception.stack
-            );
+            this.logger.error(`Prisma Error: ${exception.code}`);
 
             switch (exception.code) {
                 case 'P2002': 
@@ -55,19 +52,14 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         }
 
         else {
-            this.logger.error(
-                'Unexpected error:',
-                exception instanceof Error
-                    ? exception.stack
-                    : exception
-            );
+            this.logger.error('Unexpected request error');
         }
 
         response.status(status).json({
             success: false,
             statusCode: status,
             timestamp: new Date().toISOString(),
-            path: request.url,
+            path: request.path,
             message: Array.isArray(message) ? message.join(', ') : message,
         });
     }

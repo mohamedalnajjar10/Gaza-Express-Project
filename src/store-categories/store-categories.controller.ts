@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Body, Param, ParseIntPipe, UseGuards } from '@nestjs/common';
+import { PageDto } from 'src/common/dto/page.dto';
+import { Controller, Query, Get, Post, Body, Param, ParseIntPipe, UseGuards } from '@nestjs/common';
 import { StoreCategoriesService } from './store-categories.service';
 import { CreateStoreCategoryDto } from './dto/create-store-category.dto';
 import { RolesGuard } from 'src/common/guards/roles.guard';
@@ -14,8 +15,8 @@ export class StoreCategoriesController {
 
   @Get()
   @ApiOperation({ summary: 'Get all store categories (public)' })
-  findAll() {
-    return this.service.findAll();
+  findAll(@Query() page?: PageDto) {
+    return this.service.findAll(page);
   }
 
   @Get(':id')

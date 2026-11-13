@@ -9,11 +9,16 @@ import { GlobalExceptionFilter } from './common/filters/prisma-exception.filter'
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
-    bufferLogs: true, // Enable buffering for better log management
+    bufferLogs: true,
+    rawBody: true, // Enable buffering for better log management
     logger: ['error', 'warn', 'log', 'debug', 'verbose'],
   });
 
   const configService = app.get(ConfigService);
+  // Only enable when the API is isolated behind our single trusted gateway.
+  if (configService.get('TRUST_PROXY') === '1') {
+    app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  }
 
   // Security Headers
   app.use(helmet({
@@ -45,30 +50,26 @@ async function bootstrap() {
       whitelist: true,
       forbidNonWhitelisted: true,
       transform: true,
-      transformOptions: {
-        enableImplicitConversion: true,
-      },
     }),
   );
 
-  // Global exception filters
-  app.useGlobalFilters(new GlobalExceptionFilter());
+  app.enableShutdownHooks();
   app.useGlobalInterceptors(new ResponseInterceptor());
 
 
   // Enable CORS
   app.enableCors({
-    origin: configService.get<string>('CORS_ORIGIN', 'http://localhost:8090 ').split(','),
+    origin: configService.get<string>('CORS_ORIGIN', 'http://localhost:8090').split(',').map(origin => origin.trim()).filter(Boolean),
     credentials: true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
-    allowedHeaders: 'Content-Type, Accept, Authorization',
+    allowedHeaders: 'Content-Type, Accept, Authorization, Idempotency-Key',
     maxAge: 3600,
   });
 
   // Swagger documentation
   const config = new DocumentBuilder()
-    .setTitle('Medical Platform API')
-    .setDescription('Comprehensive Medical Platform API Documentation')
+    .setTitle('Gaza Express API')
+    .setDescription('Comprehensive Gaza Express API Documentation')
     .setVersion('1.0')
     .addBearerAuth()
     .build();

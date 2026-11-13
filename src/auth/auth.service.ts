@@ -1,3 +1,4 @@
+import type { GoogleIdentity } from './strategies/google.strategy';
 import {
     Injectable,
     UnauthorizedException,
@@ -9,8 +10,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { UserService } from '../user/user.service';
 import { OtpService } from '../otp/otp.service';
-import { OtpType } from '@prisma/client';
-import { User } from '@prisma/client';
+import { OtpType, User } from '@prisma/client';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
@@ -49,7 +49,7 @@ export class AuthService {
                     );
 
                     return {
-                        message: 'Account exists. Verification code resent',
+                        message: 'Account exists. Verification code queued',
                         otp_id: otpId,
                         user_id: existingUser.user_id,
                     };
@@ -76,13 +76,13 @@ export class AuthService {
             );
 
             return {
-                message: 'Account created successfully. Please verify your phone number',
+                message: 'Account created successfully. Verification code queued. Please verify your phone number',
                 otp_id: otpId,
                 user_id: user.user_id,
             };
 
         } catch (error) {
-            this.logger.error('Error occurred while registering user', error);
+            this.logger.error('Registration failed');
             if (error.code === 'P2002') {
                 throw new BadRequestException(
                     error.meta?.target?.includes('phone')
@@ -188,8 +188,18 @@ export class AuthService {
         }
 
         const tokens = await this.generateTokens(storedToken.user);
-        await this.revokeRefreshToken(storedToken.token_id);
-        await this.saveRefreshToken(storedToken.user.user_id, tokens.refresh_token);
+        await this.prisma.$transaction(async tx => {
+            const consumed = await tx.refreshToken.updateMany({
+                where: { token_id: storedToken.token_id, revoked_at: null, expires_at: { gt: new Date() } },
+                data: { revoked_at: new Date() },
+            });
+            if (consumed.count !== 1) throw new UnauthorizedException('Refresh token already consumed');
+            await tx.refreshToken.create({ data: {
+                user_id: storedToken.user.user_id,
+                token: crypto.createHash('sha256').update(tokens.refresh_token).digest('hex'),
+                expires_at: new Date(Date.now() + this.parseExpiryToSeconds(this.configService.get<string>('JWT_REFRESH_EXPIRES_IN', '7d')) * 1000),
+            } });
+        });
 
         return {
             tokens,
@@ -212,6 +222,7 @@ export class AuthService {
     }
 
     private async generateTokens(user: User): Promise<Tokens> {
+        if (!user.is_active) throw new ForbiddenException('Account disabled');
         const payload: JwtPayload = {
             sub: user.user_id,
             phone: user.phone,
@@ -240,6 +251,7 @@ export class AuthService {
 
         const refresh_token = this.jwtService.sign(payload, {
             secret: jwtRefreshSecret,
+            jwtid: crypto.randomUUID(),
             expiresIn: refreshExpirySec,
         });
 
@@ -288,64 +300,24 @@ export class AuthService {
         });
     }
 
-    private async revokeRefreshToken(tokenId: number): Promise<void> {
-        const updateData = {
-            revoked_at: new Date(),
-        };
-
-        await this.prisma.refreshToken.update({
-            where: { token_id: tokenId },
-            data: updateData,
-        });
+    async handleGoogleLogin(identity: GoogleIdentity): Promise<number> {
+        let user = await this.userService.findByGoogleId(identity.googleId);
+        if (!user) {
+            if (await this.userService.findByEmail(identity.email)) {
+                throw new UnauthorizedException('Google account is not linked to this login');
+            }
+            user = await this.userService.createGoogleUser(identity);
+        }
+        if (!user.is_active) throw new UnauthorizedException('Account disabled');
+        return user.user_id;
     }
 
-    async handleGoogleLogin(googleUserData: {
-        googleId: string;
-        email: string;
-        full_name?: string;
-        profile_photo_url?: string;
-        accessToken?: string;
-    }): Promise<{ access_token: string; user: any }> {
-
-        let user = await this.userService.findByGoogleId(googleUserData.googleId);
-
-        if (!user) {
-            user = await this.userService.findByEmail(googleUserData.email);
-
-            if (user && !user.googleId) {
-                user = await this.userService.linkGoogleAccount(
-                    user.user_id,
-                    googleUserData.googleId,
-                    googleUserData.profile_photo_url,
-                );
-            }
-        }
-
-        if (!user) {
-            user = await this.userService.createGoogleUser({
-                googleId: googleUserData.googleId,
-                email: googleUserData.email,
-                full_name: googleUserData.full_name || 'Google User',
-                profile_photo_url: googleUserData.profile_photo_url,
-            });
-        }
-
-        await this.userService.updateLastLogin(user.user_id);
-
+    async issueGoogleSession(userId: number) {
+        const user = await this.userService.findById(userId);
+        if (!user?.googleId || !user.is_active) throw new UnauthorizedException('Account unavailable');
         const tokens = await this.generateTokens(user);
         await this.saveRefreshToken(user.user_id, tokens.refresh_token);
-
-        return {
-            access_token: tokens.access_token,
-            user: {
-                user_id: user.user_id,
-                email: user.email,
-                full_name: user.full_name,
-                profile_photo_url: user.profile_photo_url,
-                provider: user.provider,
-                phone: user.phone,
-                role: user.role,
-            },
-        };
+        await this.userService.updateLastLogin(user.user_id);
+        return { tokens, user: { id: user.user_id, email: user.email, full_name: user.full_name, role: user.role } };
     }
 }

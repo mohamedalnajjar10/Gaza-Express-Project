@@ -1,3 +1,4 @@
+import { PageDto, pageWindow } from 'src/common/dto/page.dto';
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -93,8 +94,8 @@ export class UserService {
     }
   }
 
-  async findAll(): Promise<UserPayload[]> {
-    const users = await this.prisma.user.findMany();
+  async findAll(page = new PageDto()): Promise<UserPayload[]> {
+    const users = await this.prisma.user.findMany({ ...pageWindow(page), orderBy: { user_id: 'asc' } });
     return users.map((u) => this.mapToPublic(u));
   }
 

@@ -28,7 +28,10 @@ import { GoogleAuthGuard } from 'src/common/guards/google-auth.guard';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, GoogleStrategy, GoogleAuthGuard],
+  providers: [AuthService, JwtStrategy, GoogleAuthGuard, {
+    provide: GoogleStrategy, inject: [ConfigService],
+    useFactory: (config: ConfigService) => config.get('GOOGLE_AUTH_ENABLED') === 'true' ? new GoogleStrategy(config) : null,
+  }],
   exports: [AuthService, JwtModule],
 })
 export class AuthModule { }

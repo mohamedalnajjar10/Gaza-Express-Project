@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -75,6 +76,7 @@ const mockConfigService = {
 };
 
 const mockPrismaService = {
+  $transaction: jest.fn(),
   refreshToken: {
     create: jest.fn(),
     findUnique: jest.fn(),
@@ -105,6 +107,8 @@ describe('AuthService', () => {
 
     authService = module.get<AuthService>(AuthService);
     jest.clearAllMocks();
+    mockPrismaService.$transaction.mockImplementation(fn => fn(mockPrismaService));
+    mockPrismaService.refreshToken.updateMany.mockResolvedValue({ count: 1 });
 
     mockConfigService.get.mockImplementation((key: string, def?: any) => {
       const configs: Record<string, any> = {
@@ -149,6 +153,7 @@ describe('AuthService', () => {
         dto.full_name,
         dto.full_name_ar,
         dto.email,
+        undefined,
       );
       expect(mockOtpService.sendOtp).toHaveBeenCalledWith(
         dto.phone,
@@ -411,7 +416,7 @@ describe('AuthService', () => {
 
       expect(result.message).toBeDefined();
       expect(mockPrismaService.refreshToken.updateMany).toHaveBeenCalledWith({
-        where: { user_id: 1, token: 'valid.token' },
+        where: { user_id: 1, token: createHash('sha256').update('valid.token').digest('hex') },
         data: { revoked_at: expect.any(Date) },
       });
     });
@@ -434,54 +439,25 @@ describe('AuthService', () => {
       profile_photo_url: 'http://photo.url',
     };
 
-    it('[SUCCESS] should return tokens for existing google user', async () => {
-      const existingGoogleUser = { ...mockUser, googleId: 'google-123' };
-      mockUserService.findByGoogleId.mockResolvedValue(existingGoogleUser);
-
-      const result = await authService.handleGoogleLogin(googleUserData);
-
-      expect(result).toMatchObject({
-        access_token: expect.any(String),
-        user: expect.objectContaining({
-          email: 'test@example.com',
-        }),
-      });
-      expect(mockUserService.updateLastLogin).toHaveBeenCalledWith(existingGoogleUser.user_id);
+    it('matches the already linked provider subject', async () => {
+      mockUserService.findByGoogleId.mockResolvedValue({ ...mockUser, googleId: 'google-123' });
+      await expect(authService.handleGoogleLogin(googleUserData)).resolves.toBe(mockUser.user_id);
+      expect(mockUserService.findByEmail).not.toHaveBeenCalled();
     });
 
-    it('[SUCCESS] should link google account if email matches an existing user without googleId', async () => {
+    it.each([null, 'different-google-subject'])('rejects email-only matching with subject %s', async (googleId) => {
       mockUserService.findByGoogleId.mockResolvedValue(null);
-      mockUserService.findByEmail.mockResolvedValue(mockUser);
-      
-      const linkedUser = { ...mockUser, googleId: 'google-123' };
-      mockUserService.linkGoogleAccount.mockResolvedValue(linkedUser);
-
-      const result = await authService.handleGoogleLogin(googleUserData);
-
-      expect(mockUserService.linkGoogleAccount).toHaveBeenCalledWith(
-        mockUser.user_id,
-        googleUserData.googleId,
-        googleUserData.profile_photo_url,
-      );
-      expect(result.access_token).toBeDefined();
+      mockUserService.findByEmail.mockResolvedValue({ ...mockUser, googleId });
+      await expect(authService.handleGoogleLogin(googleUserData)).rejects.toThrow(UnauthorizedException);
+      expect(mockUserService.linkGoogleAccount).not.toHaveBeenCalled();
     });
 
-    it('[SUCCESS] should create a new user if neither googleId nor email exists', async () => {
+    it('provisions a Google subject with no existing email match', async () => {
       mockUserService.findByGoogleId.mockResolvedValue(null);
       mockUserService.findByEmail.mockResolvedValue(null);
-      
-      const newGoogleUser = { ...mockUser, googleId: 'google-123', email: googleUserData.email };
-      mockUserService.createGoogleUser.mockResolvedValue(newGoogleUser);
-
-      const result = await authService.handleGoogleLogin(googleUserData);
-
-      expect(mockUserService.createGoogleUser).toHaveBeenCalledWith({
-        googleId: googleUserData.googleId,
-        email: googleUserData.email,
-        full_name: googleUserData.full_name,
-        profile_photo_url: googleUserData.profile_photo_url,
-      });
-      expect(result.access_token).toBeDefined();
+      mockUserService.createGoogleUser.mockResolvedValue(mockUser);
+      await expect(authService.handleGoogleLogin(googleUserData)).resolves.toBe(mockUser.user_id);
+      expect(mockUserService.createGoogleUser).toHaveBeenCalledWith(googleUserData);
     });
   });
 });
