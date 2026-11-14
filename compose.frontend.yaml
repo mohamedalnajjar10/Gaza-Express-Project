@@ -1,0 +1,10 @@
+services:
+  gateway:
+    image: wasla-web:local
+    build:
+      context: ./apps/web
+      args:
+        VITE_GOOGLE_ENABLED: ${GOOGLE_AUTH_ENABLED:-false}
+        VITE_BANK_TRANSFER_ENABLED: ${WEB_BANK_TRANSFER_ENABLED:-false}
+    volumes:
+      - ./apps/web/nginx.conf:/etc/nginx/nginx.conf:ro

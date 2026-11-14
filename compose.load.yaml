@@ -8,4 +8,4 @@ services:
       SMS_PROVIDER: disabled
       CATALOG_CACHE_URL: ${LOAD_CACHE_URL-redis://catalog-cache:6379}
     volumes:
-      - ./test/load:/app/load:ro
+      - ./apps/api/test/load:/app/load:ro

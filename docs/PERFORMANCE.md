@@ -4,16 +4,18 @@ Docker Compose defaults to two NestJS replicas behind Nginx and one SMS worker w
 
 MySQL is the authority for accounts, orders, payments and the durable SMS outbox. The worker claims outbox jobs in MySQL. Redis rate counters have their own `noeviction` instance. A separate `allkeys-lru` Redis stores the first unfiltered page of the public store list, default top-rated list and default store-category page. The cache stores at most 128 KiB per value for 20ط£آ¢أ¢â€ڑآ¬أ¢â‚¬إ“25 seconds, and each replica combines simultaneous misses for the same key. After mutations the API changes the shared generation. A slow read using the old generation cannot refill the new generation. If Redis is unavailable reads fall back to MySQL. If a committed mutation cannot invalidate the cache, stale values can remain until their TTL expires. Checkout, balances, private data and OTP jobs never read from the catalog cache.
 
-Lists keep their existing response shape. Products, categories, reviews, favorites, users, addresses and my-stores accept `page` (1ط£آ¢أ¢â€ڑآ¬أ¢â‚¬إ“200) and `limit` (1ط£آ¢أ¢â€ڑآ¬أ¢â‚¬إ“100, default 25). The main store list defaults to 20. Sorts use stable ID tie-breakers. Order and notification lists already use cursors. Store details return a preview of 12 categories, 12 products per category, 20 options per product, 20 images and 10 reviews. Full product and option lists are paginated through `/products/store/:storeId` and `/products/:id/options`. Search terms are bounded. Nginx limits request bodies to 1 MiB. The `%term%` search still scans candidates within its filters and is a candidate for a dedicated search design once measured at production scale.
+Lists keep their existing response shape. Products, categories, reviews, favorites, users, addresses and my-stores accept `page` (1ط£آ¢أ¢â€ڑآ¬أ¢â‚¬إ“200) and `limit` (1ط£آ¢أ¢â€ڑآ¬أ¢â‚¬إ“100, default 25). The main store list defaults to 20. Sorts use stable ID tie-breakers. Order and notification lists already use cursors. Store details return a preview of 12 categories, 12 products per category, 20 options per product, 20 images and 10 reviews. Full product and option lists are paginated through `/products/store/:storeId` and `/products/:id/options`. Search terms are bounded. The `%term%` search still scans candidates within its filters and is a candidate for a dedicated search design once measured at production scale.
+
+The gateway allows request bodies up to 6 MiB to accommodate multipart product images. The product endpoint enforces a separate 5 MiB file limit and bounds image decoding to 16 million pixels.
 
 ## Repeat the load runs
 
 Run from the project root in PowerShell. Docker must be running.
 
 ```powershell
-.\test\load\run.ps1
-.\test\load\run.ps1 -Mode soak -SoakDuration 30m
-.\test\load\run.ps1 -NoCatalogCache
+.\apps\api\test\load\run.ps1
+.\apps\api\test\load\run.ps1 -Mode soak -SoakDuration 30m
+.\apps\api\test\load\run.ps1 -NoCatalogCache
 ```
 
 The runner uses project `wasla-perf`, loopback port `5051`, schema `wasla_load_test`, independent JWT secrets and seeded fixture accounts. It stops the project after the run unless `-KeepRunning` is passed. Test data remains in that project's Docker volume. The API's rate limit is bypassed only with `NODE_ENV=test`, `LOAD_TEST_MODE=1` and that exact schema. A separate live-Redis check exercises the shared counter. The k6 scenarios cover browsing, password login and address/cart/checkout/cancellation. The thresholds fail on any `429`, more than 1% failures, or breached p95 thresholds. The run targets closed-loop virtual users and reports achieved throughput. VUs and requests per second are separate units.

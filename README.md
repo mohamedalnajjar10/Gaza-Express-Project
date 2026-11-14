@@ -23,13 +23,23 @@
 
 ## Description
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+Gaza Express delivery platform.
+
+- [`apps/api`](apps/api) contains the NestJS API, Prisma migrations, worker and API tests.
+- [`apps/web`](apps/web) contains the React storefront, operations screens and browser tests.
+- [`infra`](infra) contains the API gateway and infrastructure configuration.
+- [`docs`](docs) contains the operating guides and API handoff.
 
 ## Project setup
 
 ```bash
-$ npm install
+cd apps/api
+npm ci
 ```
+
+Run the NestJS commands below from `apps/api`. For the frontend, open a separate terminal in `apps/web`, run `npm ci`, then `npm run dev`. The development frontend proxies the API to port 5050.
+
+Run Docker Compose from the repository root. To serve the web application and API on the same origin, run `docker compose -f compose.yaml -f compose.frontend.yaml up --build -d` and open http://localhost:5050.
 
 ## Compile and run the project
 
