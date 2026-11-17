@@ -29,6 +29,9 @@ export default function OrderDetail() {
                 {orderLabels[order.status] || order.status}
               </span>
               <h2>تفاصيل الطلب</h2>
+              {order.events?.filter(event => event.action === 'checkout' && event.details?.note).map(event => (
+                <p className="order-customer-note" key={event.id}>ملاحظة الطلب: {event.details?.note}</p>
+              ))}
               {order.itemSnapshots?.map((i, index) => (
                 <p key={index}>
                   {i.nameAr} × {i.quantity}
@@ -40,6 +43,8 @@ export default function OrderDetail() {
                   order.currency,
                 )}
               </strong>
+              {Number(order.rewardDiscount) > 0 && <p>خصم المكافآت: {money(order.rewardDiscount!, order.currency)}</p>}
+              {!order.finalTotal && !!order.rewardDiscountRate && ['PENDING', 'QUOTED'].includes(order.status) && <p>سيُطبّق خصم المكافآت ({order.rewardDiscountRate}٪) بعد تأكيد السعر.</p>}
               {order.events?.length ? (
                 <ol className="timeline">
                   {order.events.map(event => (

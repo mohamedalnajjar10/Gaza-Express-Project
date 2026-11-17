@@ -15,6 +15,12 @@ export class ProductCategoriesService {
       throw new NotFoundException('Store not found');
     }
     await this.assertOwnership(userId, dto.storeId);
+    if (dto.parentId != null) {
+      const parent = await this.prisma.productCategory.findFirst({
+        where: { prodCategoryId: dto.parentId, storeId: dto.storeId, parentId: null, isActive: true },
+      });
+      if (!parent) throw new BadRequestException('اختر قسمًا رئيسيًا من المتجر نفسه.');
+    }
     return this.prisma.productCategory.create({ data: dto });
   }
 

@@ -281,4 +281,29 @@ describe('Order lifecycle on MySQL', () => {
     const detail = await api('customer', 'get', `/orders/${order.body.id}`).expect(200);
     expect(detail.body.events[1]).toMatchObject({ action, details: { reason: 'Test reason' }, toStatus: status });
   });
+  it('reserves rewards once, applies the discount to payment, and releases points after cancellation', async () => {
+    const customerId = user('customer').id;
+    const earned = await db.customerOrder.count({ where: { customerId, status: 'DELIVERED' } });
+    await db.customerOrder.createMany({ data: Array.from({ length: Math.max(0, 10 - earned) }, () => ({
+      customerId, storeId, status: 'DELIVERED' as const, idempotencyKey: randomUUID(), requestHash: 'fixture', storeName: 'Test shop',
+      addressSnapshot: {}, itemSnapshots: [], currency: 'ILS', requiresQuote: false, estimatedMin: 24, estimatedMax: 24, finalTotal: 24, minimumAmount: 10,
+    })) });
+    const balance = async () => (await api('customer', 'get', '/rewards').expect(200)).body.balance;
+    const initial = await balance();
+    const savedAddress = await address();
+    const savedCart = await cart();
+    const key = randomUUID();
+    const redeem = () => api('customer', 'post', '/orders').set('Idempotency-Key', key)
+      .send({ addressId: savedAddress.body.id, cartVersion: savedCart.body.version, redeemReward: true }).expect(201);
+    const first = await redeem();
+    expect((await redeem()).body.id).toBe(first.body.id);
+    expect(await balance()).toBe(initial - 100);
+    const quote = await act('owner', first.body, 'quote', { total: 26 }).expect(200);
+    const accepted = await act('customer', quote.body, 'approve_quote').expect(200);
+    expect(accepted.body).toMatchObject({ finalTotal: '24.7', rewardDiscount: '1.3' });
+    expect((await db.payment.findUniqueOrThrow({ where: { orderId: first.body.id } })).amount.toString()).toBe('24.7');
+    await act('customer', accepted.body, 'cancel', { reason: 'Changed mind' }).expect(200);
+    expect(await balance()).toBe(initial);
+  });
+
 });

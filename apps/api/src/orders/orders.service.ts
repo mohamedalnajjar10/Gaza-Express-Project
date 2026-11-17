@@ -44,12 +44,32 @@ export class OrdersService {
   async cart(actor: Actor) {
     const cart = (await this.db.shoppingCart.findUnique({ where: { customerId: this.customer(actor) } })) ?? emptyCart;
     const items = cart.items as CartItemDto[];
-    if (!items.length) return { ...cart, items, products: [] };
-    const products = await this.db.product.findMany({
+    if (!items.length) return { ...cart, store: null, items, products: [], estimatedMin: '0', estimatedMax: '0' };
+    const [store, products] = await Promise.all([
+      cart.storeId ? this.db.store.findUnique({ where: { storeId: cart.storeId }, select: { storeName: true, storeNameAr: true } }) : null,
+      this.db.product.findMany({
       where: { productId: { in: items.map(item => item.productId) } },
-      select: { productId: true, nameAr: true, isAvailable: true },
-    });
-    return { ...cart, items, products };
+      select: {
+        productId: true, nameAr: true, imageUrl: true, unitAr: true, isAvailable: true,
+        estimatedPriceMin: true, estimatedPriceMax: true, isPriceFixed: true,
+        productOptions: { select: { optionId: true, optionName: true, optionNameAr: true, extraCost: true, isAvailable: true } },
+      },
+      }),
+    ]);
+    const byId = new Map(products.map(product => [product.productId, product]));
+    let min = new Prisma.Decimal(0);
+    let max = new Prisma.Decimal(0);
+    for (const item of items) {
+      const product = byId.get(item.productId);
+      const options = product?.productOptions.filter(option => option.isAvailable && item.optionIds.includes(option.optionId));
+      if (!product?.isAvailable || options?.length !== item.optionIds.length) {
+        return { ...cart, store, items, products };
+      }
+      const extra = options.reduce((sum, option) => sum.plus(option.extraCost), new Prisma.Decimal(0));
+      min = min.plus(product.estimatedPriceMin.plus(extra).times(item.quantity));
+      max = max.plus((product.isPriceFixed ? product.estimatedPriceMin : product.estimatedPriceMax).plus(extra).times(item.quantity));
+    }
+    return { ...cart, store, items, products, estimatedMin: min.toString(), estimatedMax: max.toString() };
   }
 
   async replaceCart(actor: Actor, dto: ReplaceCartDto) {
@@ -61,8 +81,24 @@ export class OrdersService {
       const catalog = dto.items.length ? await this.catalog(tx, dto.items) : null;
       const items = dto.items.map(({ productId, quantity, optionIds }) => ({ productId, quantity, optionIds }));
       const data = { storeId: catalog?.store.storeId ?? null, items, version: dto.version + 1 };
-      return tx.shoppingCart.upsert({ where: { customerId }, create: { customerId, ...data }, update: data });
+      const cart = await tx.shoppingCart.upsert({ where: { customerId }, create: { customerId, ...data }, update: data });
+      return { ...cart, items, estimatedMin: catalog?.min.toString() ?? '0', estimatedMax: catalog?.max.toString() ?? '0' };
     });
+  }
+
+  private async rewardBalance(db: Prisma.TransactionClient, customerId: number) {
+    const rows = await db.customerOrder.groupBy({
+      by: ['status'],
+      where: { customerId, status: { notIn: ['CANCELLED', 'REJECTED'] } },
+      _count: { _all: true },
+      _sum: { rewardPointsUsed: true },
+    });
+    const earned = (rows.find(row => row.status === 'DELIVERED')?._count._all ?? 0) * 10;
+    return earned - rows.reduce((used, row) => used + (row._sum.rewardPointsUsed ?? 0), 0);
+  }
+
+  async rewards(actor: Actor) {
+    return { balance: await this.rewardBalance(this.db, this.customer(actor)), pointsPerOrder: 10, pointsRequired: 100, discountPercent: 5 };
   }
 
   async checkout(actor: Actor, key: string | undefined, dto: CheckoutDto) {
@@ -70,7 +106,8 @@ export class OrdersService {
     if (!key || !/^[A-Za-z0-9_-]{16,64}$/.test(key)) throw new BadRequestException('Invalid Idempotency-Key');
     const idempotencyKey = key.toLowerCase();
     const paymentMethod = dto.paymentMethod ?? 'CASH';
-    const requestHash = createHash('sha256').update(`${dto.cartVersion}:${dto.addressId}${paymentMethod === 'CASH' ? '' : `:${paymentMethod}`}`).digest('hex');
+    const note = dto.note?.trim();
+    const requestHash = createHash('sha256').update(`${dto.cartVersion}:${dto.addressId}${paymentMethod === 'CASH' ? '' : `:${paymentMethod}`}${dto.redeemReward ? ':reward' : ''}${note ? `:note:${note}` : ''}`).digest('hex');
     return this.db.$transaction(async tx => {
       await this.lockCustomer(tx, customerId);
       const existing = await tx.customerOrder.findUnique({ where: { customerId_idempotencyKey: { customerId, idempotencyKey } } });
@@ -94,12 +131,16 @@ export class OrdersService {
       if (max.lt(store.minOrderAmount) || (!requiresQuote && min.lt(store.minOrderAmount))) {
         throw new BadRequestException('Order is below the store minimum');
       }
+      if (dto.redeemReward && await this.rewardBalance(tx, customerId) < 100) {
+        throw new ConflictException('رصيد النقاط لا يكفي لاستخدام الخصم.');
+      }
       const order = await tx.customerOrder.create({ data: {
         customerId, paymentMethod, storeId: store.storeId, idempotencyKey, requestHash, storeName: store.storeName,
         addressSnapshot: { id: address.id, label: address.label, address: address.address, latitude: address.latitude.toString(), longitude: address.longitude.toString() },
         itemSnapshots: snapshots, currency: 'ILS', estimatedMin: min, estimatedMax: max,
         minimumAmount: store.minOrderAmount, requiresQuote,
-        events: { create: { actorId: actor.user_id, actorRole: actor.role, version: 1, action: 'checkout', toStatus: 'PENDING' } },
+        ...(dto.redeemReward && { rewardPointsUsed: 100, rewardDiscountRate: 5 }),
+        events: { create: { actorId: actor.user_id, actorRole: actor.role, version: 1, action: 'checkout', toStatus: 'PENDING', ...(note && { details: { note } }) } },
       } });
       await recordNotifications(tx, [store.ownerId], `order:${order.id}:1`, 'order.checkout', order.id);
       await tx.shoppingCart.update({ where: { customerId }, data: { storeId: null, items: [], version: { increment: 1 } } });
@@ -109,7 +150,8 @@ export class OrdersService {
 
   async list(actor: Actor, before?: number) {
     const rows = await this.db.customerOrder.findMany({
-      where: { ...this.scope(actor), id: before ? { lt: before } : undefined }, orderBy: { id: 'desc' }, take: 51,
+      where: { ...this.scope(actor), id: before ? { lt: before } : undefined },
+      include: { store: { select: { logoUrl: true, coverImageUrl: true, storeNameAr: true } } }, orderBy: { id: 'desc' }, take: 51,
     });
     const page = rows.slice(0, 50);
     return { orders: page.map(order => this.view(order)), nextBefore: rows.length > 50 ? page[49].id : null };
@@ -218,7 +260,12 @@ export class OrdersService {
         data.offerExpiresAt = null;
       }
       if (rule.to === 'ACCEPTED') {
-        await this.finance.createPayment(tx, order, new Prisma.Decimal(data.finalTotal as Prisma.Decimal));
+        const total = new Prisma.Decimal(data.finalTotal as Prisma.Decimal);
+        const discount = total.times(order.rewardDiscountRate).div(100).toDecimalPlaces(2);
+        data.rewardDiscount = discount;
+        const payable = total.minus(discount);
+        data.finalTotal = payable;
+        await this.finance.createPayment(tx, order, payable);
       }
       const updated = await tx.customerOrder.updateMany({ where: { ...where, version: dto.version }, data }).catch(error => {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw new ConflictException('Driver already has an active delivery');

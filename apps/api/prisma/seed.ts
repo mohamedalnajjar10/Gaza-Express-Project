@@ -3,6 +3,15 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
+  const storeCategories = ['مطاعم', 'سوبر ماركت', 'مول', 'مخبز', 'محل جوالات'];
+  for (const [sortOrder, nameAr] of storeCategories.entries()) {
+    await prisma.storeCategory.upsert({
+      where: { nameAr },
+      create: { nameAr, sortOrder },
+      update: { isActive: true },
+    });
+  }
+
   const store1 = await prisma.store.findFirst();
   if (!store1) {
     console.log('No stores found. Skipping product category seeding.');

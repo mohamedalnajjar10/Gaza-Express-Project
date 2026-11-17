@@ -1,3 +1,4 @@
+import { StoreTile } from '../catalog/store-tile';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../shared/api/client';
@@ -13,7 +14,7 @@ export default function Favorites() {
         {
           storeId?: number;
           productId?: number;
-          store?: { storeName: string; storeNameAr?: string };
+          store?: { storeName: string; storeNameAr?: string; logoUrl?: string; coverImageUrl?: string };
           product?: { nameAr: string; storeId: number };
         }[]
       >(`/favorites/${kind}`, { signal }),
@@ -36,17 +37,17 @@ export default function Favorites() {
       <Result state={state}>
         {rows =>
           rows.length ? (
-            <div className="stack">
+            <div className={kind === 'stores' ? 'store-tiles' : 'stack'}>
               {rows.map(row => (
                 <div
-                  className="surface padded"
+                  className={kind === 'stores' ? 'favorite-store-tile' : 'surface padded'}
                   key={row.storeId ?? row.productId}
                 >
-                  <Link to={`/stores/${row.storeId ?? row.product?.storeId}`}>
+                  {row.store && row.storeId ? <StoreTile id={row.storeId} name={row.store.storeNameAr || row.store.storeName} logo={row.store.logoUrl} cover={row.store.coverImageUrl} /> : <Link to={`/stores/${row.storeId ?? row.product?.storeId}`}>
                     {row.store?.storeNameAr ||
                       row.store?.storeName ||
                       row.product?.nameAr}
-                  </Link>
+                  </Link>}
                   <ActionForm
                     label="إزالة من المفضّلة"
                     submit={async () => {

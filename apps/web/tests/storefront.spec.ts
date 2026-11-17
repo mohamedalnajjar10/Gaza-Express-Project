@@ -18,6 +18,7 @@ test('customer searches, adds a product, checks out and cancels', async ({page})
   let items: unknown[] = [];
   let version = 0;
   let submitted = 0;
+  let favorite = false;
   let status = 'PENDING';
   let catalogRequests = 0;
   const failures: string[] = [];
@@ -34,7 +35,11 @@ test('customer searches, adds a product, checks out and cancels', async ({page})
     if (path === '/auth/profile') return success(route, {user_id:10,role:'customer',full_name:'عميل تجريبي'});
     if (path === '/stores') return success(route, {data:[store],meta:{page:1,totalPages:1,total:1}});
     if (path === '/store-categories') return success(route, []);
+    if (path === '/product-categories') return success(route, [{prodCategoryId: 5, nameAr: 'المخبوزات'}, {prodCategoryId: 6, parentId: 5, nameAr: 'الخبز'}]);
     if (path === '/stores/1') return success(route, {...store,productCategories:[{products:[product]}],reviews:[]});
+    if (path === '/favorites/stores/check/1') return success(route, favorite);
+    if (path === '/favorites/stores/1') { favorite = method === 'POST'; return success(route, {}); }
+    if (path === '/products/store/1/best-sellers') return success(route, []);
     if (path === '/products/store/1') return success(route, [{...product,imageUrl:'/api/v1/products/images/9961c615-96cb-4a6e-b3f2-2f403e0e2944.webp'}]);
     if (path.startsWith('/products/images/')) return route.fulfill({
       contentType:'image/png',
@@ -42,13 +47,15 @@ test('customer searches, adds a product, checks out and cancels', async ({page})
     });
     if (path === '/cart') {
       if (method === 'PUT') { expect(request.postDataJSON().version).toBe(version++); items = request.postDataJSON().items; }
-      return success(route,{version,storeId:items.length ? 1 : null,items,products:[product]});
+      return success(route,{version,storeId:items.length ? 1 : null,items,products:[product],estimatedMin:String(items.reduce((sum, line) => sum + 12 * (line as {quantity:number}).quantity, 0))});
     }
     if (path === '/addresses') return success(route,[address]);
+    if (path === '/rewards') return success(route, {balance:100,pointsRequired:100,pointsPerOrder:10,discountPercent:5});
+    if (path === '/orders' && method === 'GET') return success(route, {orders:[],nextBefore:null});
     if (path === '/orders') {
       submitted++;
       expect(request.headers()['idempotency-key']).toMatch(/^[a-f0-9-]{36}$/);
-      expect(request.postDataJSON()).toEqual({addressId:5,cartVersion:1,paymentMethod:'CASH'});
+      expect(request.postDataJSON()).toEqual({addressId:5,cartVersion:3,paymentMethod:'CASH',note:'يرجى فصل الطلب',redeemReward:true});
       return success(route,order);
     }
     if (path === '/orders/51/status') {
@@ -73,13 +80,36 @@ test('customer searches, adds a product, checks out and cancels', async ({page})
   await page.getByRole('button',{name:'بحث',exact:true}).click();
   await expect(page).toHaveURL(/search=/);
   await page.getByRole('link',{name:/متجر الاختبار/}).click();
-  await expect(page.locator('.product-card img')).toHaveAttribute('src', /^blob:/);
-  await page.getByRole('button',{name:'عرض المنتج'}).click();
-  await page.getByRole('button',{name:'أضف إلى السلة'}).click();
+  await expect(page.getByRole('heading', {name: 'المنتجات الأكثر مبيعًا'})).toBeVisible();
+  await expect(page.getByText('لا توجد مبيعات مكتملة لعرضها بعد')).toBeVisible();
+  await page.getByRole('button', {name: 'إضافة المتجر للمفضلة'}).click();
+  await expect(page.getByRole('button', {name: 'إزالة المتجر من المفضلة'})).toHaveAttribute('aria-pressed', 'true');
+  await expect(page).toHaveURL(/\/stores\/1$/);
+  await page.getByRole('button', {name: 'المخبوزات', exact: true}).click();
+  const filtered = page.waitForRequest(request => new URL(request.url()).searchParams.get('categoryId') === '6');
+  await page.getByRole('group', {name: 'الأقسام الفرعية'}).getByRole('button', {name: 'الخبز'}).click();
+  await filtered;
+  const searched = page.waitForRequest(request => new URL(request.url()).searchParams.get('q') === 'خبز');
+  await page.getByLabel('البحث داخل المتجر').fill('خبز');
+  await page.locator('.store-search').getByRole('button', {name: 'بحث'}).click();
+  await searched;
+  await expect(page.locator('.store-product-tile img')).toHaveAttribute('src', /^blob:/);
+  await page.getByRole('button',{name:/إضافة خبز طازج إلى السلة/}).click();
+  await expect(page).toHaveURL(/\/stores\/1$/);
+  await expect(page.locator('.store-cart-count')).toHaveText('1');
+  await page.getByRole('button',{name:/زيادة كمية خبز طازج/}).click();
+  await expect(page.locator('.store-cart-count')).toHaveText('2');
+  await expect(page.locator('.store-cart-bar strong')).toContainText(/٢٤|24/);
+  await page.getByRole('button',{name:/تقليل كمية خبز طازج/}).click();
+  await expect(page.locator('.store-cart-count')).toHaveText('1');
+  await page.locator('.store-cart-bar').getByRole('link').click();
   await expect(page).toHaveURL(/\/cart$/);
   await expect(page.getByRole('heading', {name:'سلّتك',exact:true})).toBeVisible();
   await expect(page.getByRole('heading',{name:product.nameAr})).toBeVisible();
-  await page.getByRole('link',{name:'المتابعة إلى الدفع'}).click();
+  await page.getByLabel('ملاحظة للمتجر (اختياري)').fill('يرجى فصل الطلب');
+  await page.getByRole('link',{name:/المتابعة إلى الدفع/}).click();
+  await expect(page.getByText('ملاحظة الطلب: يرجى فصل الطلب')).toBeVisible();
+  await page.getByRole('checkbox', {name: /استخدم 100 نقطة/}).check();
   await page.getByRole('button',{name:'تأكيد الطلب'}).click();
   await expect(page.getByRole('heading',{name:'طلب #51'})).toBeVisible();
   expect(submitted).toBe(1);
@@ -132,7 +162,9 @@ test('admin adds the first store category and owner submits a store', async ({ p
     }
     if (path === '/stores' && request.method() === 'POST') {
       expect(role).toBe('store_owner');
-      expect(request.postDataJSON()).toMatchObject({ categoryId: 1, areaId: 1, latitude: 31.5, longitude: 34.45 });
+      expect(request.postDataJSON()).toMatchObject({ categoryId: 1, areaId: 5, fullAddressAr: 'شارع السوق بجوار المخبز' });
+      expect(request.postDataJSON()).not.toHaveProperty('latitude');
+      expect(request.postDataJSON()).not.toHaveProperty('longitude');
       stores.push({ ...request.postDataJSON(), storeId: 1, status: 'PENDING_APPROVAL', isOpenNow: true });
       return success(route, stores[0]);
     }
@@ -155,11 +187,20 @@ test('admin adds the first store category and owner submits a store', async ({ p
   await ownerPage.getByRole('button', { name: 'تحديث التصنيفات' }).click();
   await ownerPage.getByLabel('اسم المتجر بالعربية').fill('متجر تجريبي');
   await ownerPage.getByLabel('اسم المتجر بالإنجليزية').fill('Test store');
-  await ownerPage.getByLabel('رقم المنطقة').fill('1');
-  await ownerPage.getByLabel('خط العرض').fill('31.5');
-  await ownerPage.getByLabel('خط الطول').fill('34.45');
+  await expect(ownerPage.getByLabel('رقم المنطقة')).toHaveCount(0);
+  await expect(ownerPage.getByLabel('خط العرض')).toHaveCount(0);
+  await expect(ownerPage.getByLabel('خط الطول')).toHaveCount(0);
+  await expect(ownerPage.getByLabel('المحافظة').locator('option')).toHaveText([
+    'اختر المحافظة', 'غزة', 'خانيونس', 'رفح', 'دير البلح', 'النصيرات', 'المغازي', 'جباليا',
+  ]);
+  await ownerPage.getByLabel('العنوان', { exact: true }).fill('شارع السوق بجوار المخبز');
+  await ownerPage.getByLabel('المحافظة').selectOption({ label: 'النصيرات' });
   await ownerPage.getByRole('button', { name: 'حفظ المتجر' }).click();
   await expect(ownerPage.getByRole('heading', { name: 'متجر تجريبي' })).toBeVisible();
+  await ownerPage.getByText('تعديل بيانات المتجر', { exact: true }).click();
+  const editForm = ownerPage.locator('article');
+  await expect(editForm.getByLabel('العنوان', { exact: true })).toHaveValue('شارع السوق بجوار المخبز');
+  await expect(editForm.getByLabel('المحافظة')).toHaveValue('5');
 });
 
 test('store owner creates a section and saves a product with a multipart image', async ({ page }) => {

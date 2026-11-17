@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { useIdentity } from '../shared/auth/identity';
 import { Busy } from '../shared/ui/feedback';
+import { AccountAvatar } from '../features/account/account-avatar';
+import { RewardsLink } from '../features/account/rewards';
 import { WorkspaceLayout } from './workspace-layout';
 
 function Header() {
@@ -42,6 +44,7 @@ function Header() {
               <Package size={19} /> الطلبات
             </NavLink>
           )}
+          {profile?.role === 'customer' && <RewardsLink />}
         </nav>
         <div className="header-actions">
           {profile && (
@@ -58,9 +61,12 @@ function Header() {
               <ShoppingBag size={21} />
             </Link>
           )}
-          <Link className="header-login" to={profile ? '/account' : '/login'}>
-            <UserRound size={18} />
+          <Link className="header-login" aria-label={profile ? 'حسابي' : undefined} to={profile ? '/account' : '/login'}>
+            {profile ? (
+              <AccountAvatar compact src={profile.profile_photo_url} name={profile.full_name_ar?.trim() || profile.full_name?.trim() || 'حسابي'} />
+            ) : <UserRound size={18} />}
             <span>{profile ? 'حسابي' : 'تسجيل الدخول'}</span>
+            {profile && <bdi className="header-profile-name">{profile.full_name_ar?.trim() || profile.full_name?.trim()}</bdi>}
           </Link>
         </div>
       </div>
@@ -74,7 +80,7 @@ export function Layout() {
     window.scrollTo(0, 0);
   }, [pathname]);
   if (profile && profile.role !== 'customer' && /^\/(operations|orders|account|notifications)(\/|$)/.test(pathname)) {
-    return <WorkspaceLayout role={profile.role} name={profile.full_name} />;
+    return <WorkspaceLayout role={profile.role} name={profile.full_name_ar?.trim() || profile.full_name} photo={profile.profile_photo_url} />;
   }
   return (
     <>
@@ -87,6 +93,12 @@ export function Layout() {
           <Outlet />
         </Suspense>
       </main>
+      {profile?.role === 'customer' && <nav className="market-bottom-nav" aria-label="التنقل السريع">
+        <NavLink aria-label="الرئيسية" to="/" end><House size={21} /> الرئيسية</NavLink>
+        <NavLink aria-label="طلباتي" to="/orders"><Package size={21} /> الطلبات</NavLink>
+        <NavLink aria-label="سلة التسوق" to="/cart"><ShoppingBag size={21} /> السلة</NavLink>
+        <NavLink aria-label="الملف الشخصي" to="/account"><UserRound size={21} /> حسابي</NavLink>
+      </nav>}
       <footer>
         <div className="container footer">
           <span>غزة إكسبرس</span>

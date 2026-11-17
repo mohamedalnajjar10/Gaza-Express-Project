@@ -28,6 +28,11 @@ export class ProductsController {
     return this.service.findByStore(storeId, query.availableOnly !== 'false', query);
   }
 
+  @Get('store/:storeId/best-sellers')
+  bestSellers(@Param('storeId', ParseIntPipe) storeId: number) {
+    return this.service.bestSellers(storeId);
+  }
+
   @Get('search/:storeId')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Search products in store' })

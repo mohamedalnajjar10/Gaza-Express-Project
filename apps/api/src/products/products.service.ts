@@ -40,18 +40,52 @@ export class ProductsService {
     }));
   }
 
-  async findByStore(storeId: number, availableOnly = true, page = new PageDto()) {
+  async findByStore(storeId: number, availableOnly = true, page: PageDto & { categoryId?: number; q?: string } = new PageDto()) {
     return this.prisma.product.findMany({
       ...pageWindow(page),
       where: {
         storeId,
         ...(availableOnly && { isAvailable: true }),
+        ...(page.q && { OR: [{ nameAr: { contains: page.q } }, { nameEn: { contains: page.q } }] }),
+        ...(page.categoryId && {
+          productCategory: {
+            isActive: true,
+            OR: [{ prodCategoryId: page.categoryId }, { parentId: page.categoryId, parent: { isActive: true, storeId } }],
+          },
+        }),
       },
       include: {
         productCategory: true,
         productOptions: { take: 20, orderBy: { optionId: 'asc' } },
       },
       orderBy: [{ sortOrder: 'asc' }, { productId: 'asc' }],
+    });
+  }
+
+  async bestSellers(storeId: number) {
+    const ranked = await this.prisma.$queryRaw<{ productId: number }[]>`
+      SELECT p.product_id AS productId
+      FROM customer_orders o
+      JOIN JSON_TABLE(o.itemSnapshots, '$[*]' COLUMNS (
+        productId INT PATH '$.productId',
+        quantity INT PATH '$.quantity'
+      )) AS item ON item.quantity > 0
+      JOIN products p ON p.product_id = item.productId AND p.store_id = o.storeId
+      JOIN stores s ON s.store_id = p.store_id AND s.status = 'ACTIVE'
+      WHERE o.storeId = ${storeId} AND o.status = 'DELIVERED' AND p.is_available = true
+      GROUP BY p.product_id
+      ORDER BY SUM(item.quantity) DESC, p.product_id ASC
+      LIMIT 12
+    `;
+    if (!ranked.length) return [];
+    const products = await this.prisma.product.findMany({
+      where: { storeId, isAvailable: true, productId: { in: ranked.map(row => row.productId) } },
+      include: { productCategory: true, productOptions: { take: 20, orderBy: { optionId: 'asc' } } },
+    });
+    const byId = new Map(products.map(product => [product.productId, product]));
+    return ranked.flatMap(({ productId }) => {
+      const product = byId.get(productId);
+      return product ? [product] : [];
     });
   }
 

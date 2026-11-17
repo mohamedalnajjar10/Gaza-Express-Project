@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Package, Search, Plus, Layers3 } from 'lucide-react';
 import { api, ApiError, json } from '../../shared/api/client';
 import { useResource } from '../../shared/hooks/use-resource';
 import { money } from '../../shared/lib/money';
@@ -8,7 +9,7 @@ import { Pager } from '../../shared/ui/pager';
 import type { Product } from '../catalog/types';
 import { ProductImage } from '../catalog/product-image';
 
-type Section = { prodCategoryId: number; nameAr: string; nameEn?: string };
+type Section = { prodCategoryId: number; nameAr: string; nameEn?: string; parentId?: number | null };
 type ManagedProduct = Product & {
   prodCategoryId?: number;
   productCategory?: Section;
@@ -18,19 +19,31 @@ type ManagedProduct = Product & {
 };
 const maxImageSize = 5 * 1024 * 1024;
 
-export default function Products({ storeId }: { storeId: number }) {
+export default function Products({
+  storeId,
+  storeName,
+}: {
+  storeId: number;
+  storeName?: string;
+}) {
+  const panelRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    panelRef.current?.focus({ preventScroll: true });
+    panelRef.current?.scrollIntoView({ block: 'start' });
+  }, [storeId]);
   const [page, setPage] = useState(1);
+  const [query, setQuery] = useState('');
+  const [availability, setAvailability] = useState('all');
   const [created, setCreated] = useState('');
   const categories = useResource(
-    signal =>
-      api<Section[]>(
-        `/product-categories?storeId=${storeId}&limit=100`,
-        { signal },
-      ),
+    (signal) =>
+      api<Section[]>(`/product-categories?storeId=${storeId}&limit=100`, {
+        signal,
+      }),
     `sections:${storeId}`,
   );
   const products = useResource(
-    signal =>
+    (signal) =>
       api<ManagedProduct[]>(
         `/products/store/${storeId}?availableOnly=false&limit=20&page=${page}`,
         { signal },
@@ -38,27 +51,56 @@ export default function Products({ storeId }: { storeId: number }) {
     `products:${storeId}:${page}`,
   );
 
+  const matchesProduct = (p: ManagedProduct) =>
+    p.nameAr.includes(query.trim()) &&
+    (availability === 'all' ||
+      p.isAvailable === (availability === 'available'));
   return (
-    <section className="surface padded stack">
-      <h2>منتجات المتجر</h2>
+    <section
+      ref={panelRef}
+      tabIndex={-1}
+      aria-label="إدارة منتجات المتجر"
+      className="surface padded stack owner-products"
+    >
+      <div className="owner-section-heading">
+        <div>
+          <span className="owner-eyebrow">الكتالوج</span>
+          <h2>منتجات المتجر</h2>
+          <p>
+            {storeName || 'أدر منتجاتك وأقسامك من هنا'} • الأسعار والتوفر والصور
+          </p>
+        </div>
+        <Package size={30} aria-hidden="true" />
+      </div>
       <details>
-        <summary>أقسام المنتجات</summary>
+        <summary>
+          <Layers3 size={18} aria-hidden="true" /> <span>أقسام المنتجات</span>
+        </summary>
         <ActionForm
           key={created}
           label="إضافة قسم"
-          submit={async data => {
+          submit={async (data) => {
             const nameAr = String(data.get('nameAr')).trim();
             const nameEn = String(data.get('nameEn')).trim();
             if (nameAr.length < 2)
               throw new ApiError(400, 'أدخل اسمًا للقسم من حرفين على الأقل.');
             const category = await api<Section>(
               '/product-categories',
-              json('POST', { storeId, nameAr, ...(nameEn && { nameEn }) }),
+              json('POST', { storeId, nameAr, ...(nameEn && { nameEn }), ...(data.get('parentId') && { parentId: Number(data.get('parentId')) }) }),
             );
             setCreated(String(category.prodCategoryId));
             categories.reload();
           }}
         >
+          <label>
+            القسم الرئيسي
+            <select name="parentId" defaultValue="">
+              <option value="">بدون — قسم رئيسي</option>
+              {categories.data?.filter(section => !section.parentId).map(section => (
+                <option key={section.prodCategoryId} value={section.prodCategoryId}>{section.nameAr}</option>
+              ))}
+            </select>
+          </label>
           <Field label="اسم القسم بالعربية" name="nameAr" maxLength={191} />
           <Field
             label="اسم القسم بالإنجليزية"
@@ -68,16 +110,16 @@ export default function Products({ storeId }: { storeId: number }) {
           />
         </ActionForm>
         <Result state={categories}>
-          {rows =>
+          {(rows) =>
             rows.length ? (
               <ul>
-                {rows.map(row => (
+                {rows.map((row) => (
                   <li key={row.prodCategoryId}>
                     <details>
                       <summary>{row.nameAr}</summary>
                       <ActionForm
                         label="حفظ اسم القسم"
-                        submit={async data => {
+                        submit={async (data) => {
                           const nameAr = String(data.get('nameAr')).trim();
                           const nameEn = String(data.get('nameEn')).trim();
                           if (nameAr.length < 2)
@@ -118,9 +160,11 @@ export default function Products({ storeId }: { storeId: number }) {
         </Result>
       </details>
       <details>
-        <summary>إضافة منتج</summary>
+        <summary>
+          <Plus size={18} aria-hidden="true" /> <span>إضافة منتج</span>
+        </summary>
         <Result state={categories}>
-          {rows =>
+          {(rows) =>
             rows.length ? (
               <ProductForm
                 storeId={storeId}
@@ -137,22 +181,53 @@ export default function Products({ storeId }: { storeId: number }) {
         </Result>
       </details>
       <Result state={products}>
-        {rows => (
+        {(rows) => (
           <>
-            <div className="grid">
-              {rows.map(product => (
+            <div className="owner-toolbar">
+              <label className="owner-search">
+                <Search size={18} aria-hidden="true" />
+                <input
+                  aria-label="البحث في منتجات الصفحة"
+                  placeholder="ابحث عن منتج في هذه الصفحة…"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                />
+              </label>
+              <label className="owner-filter">
+                التوفر
+                <select
+                  aria-label="التوفر"
+                  value={availability}
+                  onChange={(e) => setAvailability(e.target.value)}
+                >
+                  <option value="all">كل المنتجات</option>
+                  <option value="available">متاح للطلب</option>
+                  <option value="unavailable">غير متاح</option>
+                </select>
+              </label>
+            </div>
+            <div className="grid owner-product-grid">
+              {rows.filter(matchesProduct).map((product) => (
                 <article
                   className="surface product-card"
                   key={product.productId}
                 >
-                  {product.imageUrl && (
+                  {product.imageUrl ? (
                     <ProductImage src={product.imageUrl} />
+                  ) : (
+                    <div className="owner-product-placeholder">
+                      <Package size={36} aria-hidden="true" />
+                    </div>
                   )}
                   <h3>{product.nameAr}</h3>
-                  <p>
-                    {product.productCategory?.nameAr ?? 'بلا قسم'} ·{' '}
-                    {product.isAvailable ? 'متاح' : 'غير متاح'}
-                  </p>
+                  <div className="owner-product-meta">
+                    <span>{product.productCategory?.nameAr ?? 'بلا قسم'}</span>
+                    <span
+                      className={`owner-status ${product.isAvailable ? 'is-active' : ''}`}
+                    >
+                      {product.isAvailable ? 'متاح' : 'غير متاح'}
+                    </span>
+                  </div>
                   {product.descriptionAr && <p>{product.descriptionAr}</p>}
                   <strong>
                     {money(product.estimatedPriceMin)}
@@ -162,7 +237,7 @@ export default function Products({ storeId }: { storeId: number }) {
                   <details>
                     <summary>تعديل المنتج</summary>
                     <Result state={categories}>
-                      {sections => (
+                      {(sections) => (
                         <ProductForm
                           storeId={storeId}
                           product={product}
@@ -175,7 +250,16 @@ export default function Products({ storeId }: { storeId: number }) {
                 </article>
               ))}
             </div>
-            {!rows.length && <Empty title="لا توجد منتجات في هذه الصفحة" />}
+            {!rows.length && (
+              <Empty title="جهّز واجهة متجرك بأول منتج">
+                <p>أضف قسمًا، ثم أضف صورة المنتج واسمه وسعره ليظهر للعملاء.</p>
+              </Empty>
+            )}
+            {!!rows.length && !rows.some(matchesProduct) && (
+              <Empty title="لا توجد منتجات تطابق بحثك">
+                <p>غيّر البحث أو فلتر التوفر.</p>
+              </Empty>
+            )}
             <Pager page={page} more={rows.length === 20} setPage={setPage} />
           </>
         )}
@@ -201,7 +285,7 @@ function ProductForm({
   const sectionOptions =
     existingSection &&
     !categories.some(
-      section => section.prodCategoryId === existingSection.prodCategoryId,
+      (section) => section.prodCategoryId === existingSection.prodCategoryId,
     )
       ? [existingSection, ...categories]
       : categories;
@@ -210,7 +294,7 @@ function ProductForm({
       <ActionForm
         key={saved}
         label="حفظ المنتج"
-        submit={async data => {
+        submit={async (data) => {
           const file = data.get('image');
           if (file instanceof File && file.size > maxImageSize)
             throw new ApiError(400, 'حجم الصورة يتجاوز 5 ميغابايت.');
@@ -229,7 +313,9 @@ function ProductForm({
             data.set(name, String(data.get(name) ?? '').trim());
           }
           if (
-            ['nameAr', 'nameEn'].some(name => String(data.get(name)).length < 2)
+            ['nameAr', 'nameEn'].some(
+              (name) => String(data.get(name)).length < 2,
+            )
           )
             throw new ApiError(
               400,
@@ -257,10 +343,17 @@ function ProductForm({
             body: data,
           });
           if (!product) setFixed(true);
-          setSaved(value => value + 1);
+          setSaved((value) => value + 1);
           reload();
         }}
       >
+        <div className="owner-form-heading">
+          <span>01</span>
+          <div>
+            <h3>تفاصيل المنتج</h3>
+            <p>اسم واضح ووصف مفيد يساعدان العميل على الاختيار.</p>
+          </div>
+        </div>
         <Field
           label="اسم المنتج بالعربية"
           name="nameAr"
@@ -283,12 +376,12 @@ function ProductForm({
             {(!product?.prodCategoryId || !sectionOptions.length) && (
               <option value="">{product ? 'بلا قسم' : 'اختر قسمًا'}</option>
             )}
-            {sectionOptions.map(section => (
+            {sectionOptions.map((section) => (
               <option
                 key={section.prodCategoryId}
                 value={section.prodCategoryId}
               >
-                {section.nameAr}
+                {section.parentId ? `${sectionOptions.find(parent => parent.prodCategoryId === section.parentId)?.nameAr ?? 'قسم رئيسي'} / ` : ''}{section.nameAr}
               </option>
             ))}
           </select>
@@ -326,11 +419,18 @@ function ProductForm({
             JPG أو PNG أو WebP. الحد الأقصى 5 ميغابايت.
           </small>
         )}
+        <div className="owner-form-heading">
+          <span>02</span>
+          <div>
+            <h3>السعر والتوفر</h3>
+            <p>حدد السعر بالشيكل، ووحدة البيع، وإمكانية الطلب.</p>
+          </div>
+        </div>
         <label className="check">
           <input
             type="checkbox"
             checked={fixed}
-            onChange={event => setFixed(event.target.checked)}
+            onChange={(event) => setFixed(event.target.checked)}
           />
           السعر ثابت
         </label>

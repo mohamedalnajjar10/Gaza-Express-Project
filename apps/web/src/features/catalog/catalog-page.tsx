@@ -1,14 +1,15 @@
+import { StoreTile } from './store-tile';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
-  ArrowDown,
+  LayoutGrid, Utensils, Croissant, Smartphone, ShoppingCart, Building2,
   ArrowLeft,
-  Clock3,
   MapPin,
   Search,
   ShoppingBag,
   Store as StoreIcon,
-  Star,
 } from 'lucide-react';
+import { useIdentity } from '../../shared/auth/identity';
+import type { Order } from '../orders/types';
 import { api } from '../../shared/api/client';
 import { type Store } from './types';
 import { Empty, Result, Title } from '../../shared/ui/feedback';
@@ -19,36 +20,14 @@ type StoresPage = {
   meta: { page: number; totalPages: number; total: number };
 };
 type Category = { categoryId: number; nameAr: string };
-function StoreCard({ store }: { store: Store }) {
-  return (
-    <Link to={`/stores/${store.storeId}`} className="store-card surface">
-      <div className="store-art">
-        {store.coverImageUrl ? (
-          <img src={store.coverImageUrl} alt="" loading="lazy" />
-        ) : (
-          <StoreIcon size={40} />
-        )}
-      </div>
-      <div className="store-info">
-        <span className={`badge ${store.isOpenNow ? '' : 'muted-badge'}`}>
-          {store.isOpenNow ? 'مفتوح الآن' : 'مغلق'}
-        </span>
-        <h3>{store.storeNameAr || store.storeName}</h3>
-        <p>{store.storeCategory?.nameAr || 'متجر محلي'}</p>
-        <div className="meta">
-          <span>
-            <Star size={15} /> {Number(store.avgRating).toFixed(1)}
-          </span>
-          <span>
-            <Clock3 size={15} /> {store.estimatedPrepMin} دقيقة تجهيز
-          </span>
-          <ArrowLeft size={17} />
-        </div>
-      </div>
-    </Link>
-  );
-}
 export default function CatalogPage() {
+  const { profile } = useIdentity();
+  const customer = profile?.role === 'customer';
+  const recent = useResource(
+    signal => customer ? api<{ orders: Order[] }>('/orders', { signal }) : Promise.resolve(null),
+    `recent:${profile?.user_id}`,
+  );
+  const recentStores = [...new Map((recent.data?.orders || []).filter(order => order.status === 'DELIVERED').map(order => [order.storeId, order])).values()].slice(0, 6);
   const [params, setParams] = useSearchParams();
   const search = params.get('search') || '';
   const category = params.get('categoryId') || '';
@@ -73,17 +52,10 @@ export default function CatalogPage() {
   };
   return (
     <>
-      <section className="hero">
+      <section className="market-hero">
         <div className="hero-content">
-          <span className="hero-location">
-            <MapPin size={16} /> تسوّق من المتاجر المحلية
-          </span>
-          <h1>
-            شو بتحب
-            <br />
-            تطلب اليوم؟
-          </h1>
-          <p>اكتشف متاجر غزة، اختَر منتجاتك المفضّلة، وتابع طلبك حتى بابك.</p>
+          {customer && <Link className="market-location" to="/addresses"><MapPin size={18} /> عنوان التوصيل <ArrowLeft size={16} /></Link>}
+          <h1>شو بتحب تطلب اليوم؟</h1>
           <form
             className="search"
             onSubmit={event => {
@@ -108,39 +80,20 @@ export default function CatalogPage() {
             <button>بحث</button>
           </form>
         </div>
-        <div className="hero-art" aria-hidden="true">
-          <div className="orbit orbit-a" />
-          <div className="orbit orbit-b" />
-          <div className="art-pin">
-            <MapPin size={38} />
-          </div>
-          <div className="art-bag">
-            <ShoppingBag size={112} strokeWidth={1.35} />
-          </div>
-          <div className="art-clock">
-            <Clock3 size={33} />
-          </div>
-        </div>
+        <ShoppingBag className="market-art" size={115} strokeWidth={1.3} aria-hidden="true" />
       </section>
       <section className="catalog" id="catalog">
-        <div className="catalog-heading">
-          <Title
-            label={search ? `نتائج البحث عن «${search}»` : 'المتاجر'}
-            detail="اعثر على المتجر المناسب لطلبك."
-          />
-          <a className="round-link" href="#stores" aria-label="عرض النتائج">
-            <ArrowDown size={19} />
-          </a>
-        </div>
-        <div className="chips" aria-label="تصنيفات المتاجر">
+        <div className="market-categories" aria-label="تصنيفات المتاجر">
           <button
             className={!category ? 'chip selected' : 'chip'}
             aria-pressed={!category}
             onClick={() => change({ categoryId: '', page: '' })}
           >
-            الكل
+            <LayoutGrid aria-hidden="true" /> الكل
           </button>
-          {categories.data?.map(item => (
+          {categories.data?.map(item => {
+            const Icon = ({ مطاعم: Utensils, مخبز: Croissant, 'محل جوالات': Smartphone, 'سوبر ماركت': ShoppingCart, مول: Building2 })[item.nameAr] || StoreIcon;
+            return (
             <button
               className={
                 category === String(item.categoryId) ? 'chip selected' : 'chip'
@@ -151,18 +104,25 @@ export default function CatalogPage() {
                 change({ categoryId: String(item.categoryId), page: '' })
               }
             >
-              {item.nameAr}
+              <Icon aria-hidden="true" /> {item.nameAr}
             </button>
-          ))}
+          ); })}
         </div>
+        {!search && !category && recentStores.length > 0 && (
+          <section className="market-recent">
+            <h2>اطلب مجددًا</h2>
+            <div>{recentStores.map(order => <StoreTile key={order.storeId} id={order.storeId} name={order.store?.storeNameAr || order.storeName} logo={order.store?.logoUrl} cover={order.store?.coverImageUrl} />)}</div>
+          </section>
+        )}
+        <Title label={search ? `نتائج البحث عن «${search}»` : 'تسوّق من المتاجر'} />
         <div id="stores">
           <Result state={stores}>
             {result =>
               result.data.length ? (
                 <>
-                  <div className="grid">
+                  <div className="store-tiles">
                     {result.data.map(store => (
-                      <StoreCard key={store.storeId} store={store} />
+                      <StoreTile key={store.storeId} id={store.storeId} name={store.storeNameAr || store.storeName} logo={store.logoUrl} cover={store.coverImageUrl} />
                     ))}
                   </div>
                   {result.meta.totalPages > 1 && (

@@ -45,6 +45,10 @@ export class OrdersController {
     return this.service.replaceCart(req.user, dto);
   }
 
+  @Get('rewards')
+  @Header('Cache-Control', 'private, no-store')
+  rewards(@Req() req: AuthenticatedRequest) { return this.service.rewards(req.user); }
+
   @Post('orders')
   @ApiHeader({ name: 'Idempotency-Key', required: true })
   async checkout(@Req() req: AuthenticatedRequest, @Headers('idempotency-key') key: string | undefined, @Body() dto: CheckoutDto) {

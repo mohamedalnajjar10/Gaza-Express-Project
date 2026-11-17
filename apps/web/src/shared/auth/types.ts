@@ -5,4 +5,8 @@ export type Profile = {
   full_name: string;
   role: Role;
   phone: string;
+  full_name_ar?: string | null;
+  email?: string | null;
+  created_at?: string;
+  profile_photo_url?: string | null;
 };

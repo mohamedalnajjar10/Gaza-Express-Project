@@ -9,6 +9,12 @@ export class CreateProductCategoryDto {
     @Min(1)
     storeId: number;
 
+    @ApiPropertyOptional()
+    @IsOptional()
+    @IsInt()
+    @Min(1)
+    parentId?: number;
+
     @ApiProperty({ example: 'ألبان', description: 'الاسم بالعربية' })
     @IsString()
     @MinLength(2)

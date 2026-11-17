@@ -9,11 +9,46 @@ export class ApiError extends Error {
     super(message);
   }
 }
-let session: Session | null = null;
+const sessionKey = 'gaza-express.session.v1';
+
+function readSession(): Session | null {
+  try {
+    const saved: unknown = JSON.parse(
+      sessionStorage.getItem(sessionKey) || 'null',
+    );
+    if (
+      saved &&
+      typeof saved === 'object' &&
+      'access_token' in saved &&
+      typeof saved.access_token === 'string' &&
+      saved.access_token &&
+      'refresh_token' in saved &&
+      typeof saved.refresh_token === 'string' &&
+      saved.refresh_token
+    ) {
+      return {
+        access_token: saved.access_token,
+        refresh_token: saved.refresh_token,
+      };
+    }
+    sessionStorage.removeItem(sessionKey);
+  } catch {
+    // Storage may be disabled. Authentication still works for this page lifetime.
+  }
+  return null;
+}
+
+let session: Session | null = readSession();
 let rotation: Promise<Session> | undefined;
 export const getSession = () => session;
 export function setSession(value: Session | null) {
   session = value;
+  try {
+    if (value) sessionStorage.setItem(sessionKey, JSON.stringify(value));
+    else sessionStorage.removeItem(sessionKey);
+  } catch {
+    // Keep the in-memory session usable if browser storage is unavailable.
+  }
 }
 async function request<T>(
   path: string,
@@ -36,7 +71,8 @@ async function request<T>(
     signal,
   });
   if (response.status === 204) return undefined as T;
-  if (response.ok && responseType === 'blob') return await response.blob() as T;
+  if (response.ok && responseType === 'blob')
+    return (await response.blob()) as T;
   const body = await response.json().catch(() => null);
   const retryAfter = Number(response.headers.get('Retry-After'));
   if (!response.ok || body?.success !== true)
@@ -65,7 +101,7 @@ export async function api<T>(
       !(error instanceof ApiError) ||
       error.status !== 401 ||
       !previous ||
-      path.startsWith('/auth/')
+      (path.startsWith('/auth/') && path !== '/auth/profile')
     )
       throw error;
     if (!session) throw error;
@@ -79,11 +115,11 @@ export async function api<T>(
         if (session === previous) setSession(tokens);
         return tokens;
       })
-      .catch(reason => {
+      .catch((reason) => {
         if (
           session === previous &&
           reason instanceof ApiError &&
-          reason.status === 401
+          (reason.status === 401 || reason.status === 403)
         ) {
           setSession(null);
           window.dispatchEvent(new Event('session-expired'));

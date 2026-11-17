@@ -4,6 +4,8 @@ export type ManagedStore = Store & {
   status: string;
   areaId: number;
   categoryId: number;
+  fullAddressAr?: string | null;
+  fullAddress?: string | null;
 };
 export const storeStatuses: Record<string, string> = {
   PENDING_APPROVAL: 'بانتظار المراجعة',

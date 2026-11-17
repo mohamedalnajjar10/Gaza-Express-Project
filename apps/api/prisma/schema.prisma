@@ -226,7 +226,11 @@ model ProductCategory {
 
   store           Store    @relation(fields: [storeId], references: [storeId], onDelete: Cascade)
   products        Product[]
+  parentId Int? @map("parent_id")
+  parent ProductCategory? @relation("ProductCategoryTree", fields: [parentId], references: [prodCategoryId], onDelete: SetNull)
+  children ProductCategory[] @relation("ProductCategoryTree")
 
+  @@index([parentId])
   @@index([storeId])
   @@map("product_categories")
 }
@@ -378,6 +382,9 @@ model CustomerOrder {
   minimumAmount Decimal @db.Decimal(14, 2)
   proposedTotal Decimal? @db.Decimal(14, 2)
   finalTotal Decimal? @db.Decimal(14, 2)
+  rewardPointsUsed Int @default(0)
+  rewardDiscountRate Int @default(0)
+  rewardDiscount Decimal @default(0) @db.Decimal(14, 2)
   requiresQuote Boolean
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -390,6 +397,7 @@ model CustomerOrder {
   @@index([customerId, id])
   @@index([storeId, id])
   @@index([driverId, id])
+  @@index([customerId, status])
   @@map("customer_orders")
 }
 

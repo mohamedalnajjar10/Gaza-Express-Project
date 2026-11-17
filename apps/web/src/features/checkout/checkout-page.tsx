@@ -1,5 +1,6 @@
+import { useRewards } from '../account/rewards';
 import { useRef } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { ApiError, api, json } from '../../shared/api/client';
 import { getCart } from '../cart/cart-api';
 import { getAddresses } from '../addresses/address-api';
@@ -9,7 +10,9 @@ import { ActionForm } from '../../shared/ui/form';
 import { useResource } from '../../shared/hooks/use-resource';
 
 export default function Checkout() {
+  const rewards = useRewards();
   const navigate = useNavigate();
+  const location = useLocation();
   const attempt = useRef<{ signature: string; key: string } | undefined>(
     undefined,
   );
@@ -38,6 +41,7 @@ export default function Checkout() {
               <p>
                 {cart.items.reduce((n, i) => n + i.quantity, 0)} قطعة في السلة
               </p>
+              {location.state?.storeId === cart.storeId && location.state?.note && <p>ملاحظة الطلب: {location.state.note}</p>}
               <ActionForm
                 label="تأكيد الطلب"
                 submit={async fields => {
@@ -45,6 +49,8 @@ export default function Checkout() {
                     addressId: Number(fields.get('addressId')),
                     cartVersion: cart.version,
                     paymentMethod: fields.get('paymentMethod'),
+                    ...(location.state?.storeId === cart.storeId && location.state?.note && { note: location.state.note }),
+                    ...(fields.has('redeemReward') && { redeemReward: true }),
                   };
                   const signature = JSON.stringify(payload);
                   if (attempt.current?.signature !== signature)
@@ -57,7 +63,7 @@ export default function Checkout() {
                     navigate(`/orders/${order.id}`, { replace: true });
                   } catch (error) {
                     if (error instanceof ApiError && error.status === 409)
-                      data.reload();
+                      { data.reload(); rewards.reload(); }
                     throw error;
                   }
                 }}
@@ -81,8 +87,14 @@ export default function Checkout() {
                     )}
                   </select>
                 </label>
+                {rewards.data && rewards.data.balance >= rewards.data.pointsRequired && (
+                  <label className="check">
+                    <input type="checkbox" name="redeemReward" />
+                    استخدم {rewards.data.pointsRequired} نقطة لخصم {rewards.data.discountPercent}٪ من السعر المؤكد
+                  </label>
+                )}
               </ActionForm>
-              <Link className="text-link" to="/cart">
+              <Link className="text-link" to="/cart" state={location.state}>
                 العودة للسلة
               </Link>
             </section>

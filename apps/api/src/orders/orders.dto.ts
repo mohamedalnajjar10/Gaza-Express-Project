@@ -1,7 +1,7 @@
 import { PaymentMethod } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
-  ArrayMaxSize, ArrayUnique, IsArray, IsEnum, IsInt, IsNumber, IsString,
+  ArrayMaxSize, ArrayUnique, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsString,
   Matches, Max, MaxLength, Min, ValidateBy, ValidateIf, ValidateNested,
 } from 'class-validator';
 
@@ -51,6 +51,12 @@ export class ReplaceCartDto {
 }
 
 export class CheckoutDto {
+  @ValidateIf(dto => dto.note !== undefined) @IsString() @MaxLength(400)
+  note?: string;
+
+  @ValidateIf(dto => dto.redeemReward !== undefined) @IsBoolean()
+  redeemReward?: boolean;
+
   @ValidateIf(dto => dto.paymentMethod !== undefined) @IsEnum(PaymentMethod)
   paymentMethod?: PaymentMethod;
 

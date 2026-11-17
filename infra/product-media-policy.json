@@ -3,6 +3,6 @@
   "Statement": [{
     "Effect": "Allow",
     "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-    "Resource": ["arn:aws:s3:::product-media/products/*"]
+    "Resource": ["arn:aws:s3:::product-media/products/*", "arn:aws:s3:::product-media/profiles/*"]
   }]
 }
