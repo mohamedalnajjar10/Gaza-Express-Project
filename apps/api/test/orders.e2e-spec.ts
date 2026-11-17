@@ -167,6 +167,13 @@ describe('Order lifecycle on MySQL', () => {
     await api('customer', 'delete', `/addresses/${savedAddress.body.id}`).expect(204);
     const detail = await api('customer', 'get', `/orders/${first.body.id}`).expect(200);
     expect(detail.body).toMatchObject({ status: 'DELIVERED', finalTotal: '26', addressSnapshot: { address: addressData.address } });
+    const unsold = await db.product.create({ data: { storeId, nameAr: 'Unsold fixture' } });
+    try {
+      const bestSellers = await api('customer', 'get', `/products/store/${storeId}/best-sellers`).expect(200);
+      expect(bestSellers.body.map(product => product.productId)).toEqual([productId]);
+    } finally {
+      await db.product.delete({ where: { productId: unsold.productId } });
+    }
     expect(detail.body.itemSnapshots[0]).toMatchObject({ nameAr: 'Original', unitMin: '12.00', options: [{ name: 'Original option', extraCost: '2.00' }] });
     expect(detail.body.events.map(event => event.action)).toEqual(['checkout', 'quote', 'quote', 'approve_quote', 'ready', 'assign', 'accept_assignment', 'pick_up', 'deliver']);
   });

@@ -14,6 +14,7 @@ import { ResponseInterceptor } from '../src/common/interceptors/response.interce
 import { RedisStorage } from '../src/infrastructure/redis.module';
 import { SmsService } from '../src/sms/sms.service';
 import { ProductMediaService } from '../src/products/product-media.service';
+import { ProfileMediaService } from '../src/user/profile-media.service';
 import { trackEndpoints } from './track-endpoints';
 
 describe('Frontend HTTP contracts', () => {
@@ -31,6 +32,7 @@ describe('Frontend HTTP contracts', () => {
   const tokens = new Map<string, string>();
   const imageName = `${randomUUID()}.webp`;
   const imagePath = `/api/v1/products/images/${imageName}`;
+  const profilePath = `/api/v1/account/images/${imageName}`;
   const imageBytes = Buffer.from('image stream fixture');
   const upload = jest.fn().mockResolvedValue(imagePath);
   const remove = jest.fn().mockResolvedValue(undefined);
@@ -48,6 +50,8 @@ describe('Frontend HTTP contracts', () => {
       consumeGoogleHandoff: async (key: string) => { const value = handoffs.get(key); handoffs.delete(key); return value; },
     }).overrideProvider(ProductMediaService).useValue({
       upload, remove, open: () => Readable.from([imageBytes]),
+    }).overrideProvider(ProfileMediaService).useValue({
+      upload: async () => profilePath, remove: async () => undefined, open: () => Readable.from([imageBytes]),
     }).compile();
     app = module.createNestApplication({ rawBody: true });
     app.setGlobalPrefix('api/v1');
@@ -81,6 +85,23 @@ describe('Frontend HTTP contracts', () => {
       await db.$disconnect();
     }
     await app?.close();
+  });
+
+  it('updates the signed-in profile and serves the saved image only to its owner', async () => {
+    const response = await call('patch', '/account/profile', 'customer')
+      .field('full_name', 'Updated Customer')
+      .field('email', `profile-${tag}@example.invalid`)
+      .attach('image', imageBytes, 'avatar.png')
+      .expect(200);
+    expect(response.body.data).toMatchObject({
+      full_name: 'Updated Customer', email: `profile-${tag}@example.invalid`, profile_photo_url: profilePath,
+    });
+    const profile = await call('get', '/auth/profile', 'customer').expect(200);
+    expect(profile.body.data.profile_photo_url).toBe(profilePath);
+    await call('get', `/account/images/${imageName}`, 'stranger').expect(404);
+    const image = await call('get', `/account/images/${imageName}`, 'customer')
+      .expect('Content-Type', /image\/webp/).expect(200);
+    expect(image.body).toEqual(imageBytes);
   });
 
   it('registers, resends, verifies, signs in, reads the profile and logs out', async () => {
