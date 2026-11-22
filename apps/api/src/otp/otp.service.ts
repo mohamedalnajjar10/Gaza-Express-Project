@@ -1,133 +1,117 @@
-    import {
-    Injectable,
-    BadRequestException,
-    InternalServerErrorException,
-    ServiceUnavailableException,
-    Logger
-} from '@nestjs/common';
-import { SmsService } from '../sms/sms.service';
-import { generateOTP } from '../common/utils/otp-generator.util';
-import { hashOTP } from '../common/utils/crypto.util';
-import { OtpType } from '@prisma/client';
-import { PrismaService } from 'prisma/prisma.service';
+import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AUTH_CONSTANTS, AUTH_ERROR_MESSAGES } from '../auth/constants/auth.constants';
+import { OtpType, Prisma } from '@prisma/client';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { PrismaService } from 'prisma/prisma.service';
+import { AUTH_CONSTANTS } from '../auth/constants/auth.constants';
+import { hashOTP } from '../common/utils/crypto.util';
+import { generateOTP } from '../common/utils/otp-generator.util';
+import { SmsService } from '../sms/sms.service';
+
+type Tx = Prisma.TransactionClient;
+const invalidCode = () => new BadRequestException('Invalid or expired verification code');
 
 @Injectable()
 export class OtpService {
-    private readonly logger = new Logger(OtpService.name);
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly sms: SmsService,
+    private readonly config: ConfigService,
+  ) {}
 
-    constructor(
-        private prisma: PrismaService,
-        private smsService: SmsService,
-        private configService: ConfigService,
-    ) { }
-
-    async sendOtp(
-        phone: string,
-        type: OtpType,
-        userId?: number
-    ): Promise<number> {
-        try {
-            const code = generateOTP(AUTH_CONSTANTS.OTP_LENGTH);
-            const otp = await this.prisma.$transaction(async tx => {
-                // Lock the existing account: concurrent issuers across replicas serialize here.
-                const users = await tx.$queryRaw<Array<{ user_id: number }>>`
-                    SELECT user_id FROM users WHERE phone = ${phone} FOR UPDATE`;
-                if (!users.length) throw new BadRequestException('Account not found');
-                if (userId !== undefined && users[0].user_id !== userId) throw new BadRequestException('Account mismatch');
-                const latest = await tx.otpCode.findFirst({ where: { phone, type }, orderBy: { created_at: 'desc' } });
-                const cooldown = Number(this.configService.get('OTP_RESEND_COOLDOWN_MS', 60000));
-                if (latest && Date.now() - latest.created_at.getTime() < cooldown) {
-                    throw new BadRequestException('Please wait before requesting a new code');
-                }
-                await tx.otpCode.updateMany({ where: { phone, type, is_used: false }, data: { is_used: true } });
-                const created = await tx.otpCode.create({ data: {
-                    phone, type, code: hashOTP(code),
-                    ...(userId && { user_id: userId }),
-                    expires_at: new Date(Date.now() + AUTH_CONSTANTS.OTP_EXPIRY_SECONDS * 1000),
-                    is_used: false,
-                } });
-                await this.smsService.enqueueVerification(tx, created.otp_id, code, created.expires_at);
-                return created;
-            });
-
-            this.logger.log('Verification delivery requested');
-            return otp.otp_id;
-
-        } catch (error) {
-            if (error instanceof BadRequestException || error instanceof ServiceUnavailableException) {
-                throw error;
-            }
-            this.logger.error('Verification delivery failed');
-            throw new InternalServerErrorException(
-                'Failed to send verification code'
-            );
-        }
+  async sendSignup(phone: string, createPending: boolean): Promise<void> {
+    if (!['twilio', 'fake'].includes(this.config.get('SMS_PROVIDER', 'disabled'))) {
+      throw new ServiceUnavailableException('Verification is unavailable');
     }
+    await this.prisma.$transaction(async tx => {
+      if (createPending) {
+        await tx.$executeRaw`
+          INSERT INTO users (phone, full_name, password_hash, updated_at)
+          VALUES (${phone}, 'Pending verification', '', CURRENT_TIMESTAMP(3))
+          ON DUPLICATE KEY UPDATE user_id = user_id`;
+      }
+      const user = await this.lockUser(tx, phone);
+      if (!user?.is_active || user.is_verified || user.role === 'admin') return;
+      await this.issue(tx, phone, OtpType.PHONE_VERIFICATION, user.user_id);
+    });
+  }
 
-    async verifyOtp(
-        phone: string,
-        code: string,
-        type: OtpType
-    ): Promise<any> {
-        try {
-            const hashedInput = hashOTP(code);
+  async sendOtp(phone: string, type: OtpType, userId?: number): Promise<number> {
+    return this.prisma.$transaction(async tx => {
+      const user = await this.lockUser(tx, phone);
+      if (!user || (userId !== undefined && user.user_id !== userId)) {
+        throw new BadRequestException('Account unavailable');
+      }
+      const issued = await this.issue(tx, phone, type, user.user_id);
+      if (issued === undefined) throw new BadRequestException('Please wait before requesting a new code');
+      return issued;
+    });
+  }
 
-            const otp = await this.prisma.otpCode.findFirst({
-                where: {
-                    phone,
-                    code: hashedInput,
-                    type,
-                    is_used: false,
-                    expires_at: { gt: new Date() },
-                },
-                include: { user: true },
-            });
+  resendOtp(phone: string, type: OtpType, userId?: number) {
+    return this.sendOtp(phone, type, userId);
+  }
 
-            if (!otp) {
-                throw new BadRequestException(AUTH_ERROR_MESSAGES.OTP_INVALID);
-            }
+  async verifyOtp<T>(
+    phone: string,
+    code: string,
+    purpose: OtpType,
+    consume: (tx: Tx, userId: number) => Promise<T>,
+  ): Promise<T> {
+    const result = await this.prisma.$transaction(async tx => {
+      const user = await this.lockUser(tx, phone);
+      if (!user?.is_active || user.is_verified || user.role === 'admin') return null;
+      const otp = await tx.otpCode.findFirst({
+        where: { user_id: user.user_id, phone, type: purpose, challenge: { not: null }, is_used: false, expires_at: { gt: new Date() } },
+        orderBy: { otp_id: 'desc' },
+      });
+      if (!otp?.challenge || otp.attempts >= AUTH_CONSTANTS.MAX_OTP_ATTEMPTS) return null;
+      const actual = this.digest(code, otp.challenge, phone, purpose);
+      if (!/^[a-f0-9]{64}$/.test(otp.code) || !timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(otp.code, 'hex'))) {
+        await tx.otpCode.update({ where: { otp_id: otp.otp_id }, data: { attempts: { increment: 1 } } });
+        return null;
+      }
+      await tx.otpCode.update({ where: { otp_id: otp.otp_id }, data: { is_used: true } });
+      return consume(tx, user.user_id);
+    });
+    if (result === null) throw invalidCode();
+    return result;
+  }
 
-            const consumed = await this.prisma.otpCode.updateMany({
-                where: { otp_id: otp.otp_id, is_used: false, expires_at: { gt: new Date() } },
-                data: { is_used: true },
-            });
+  private async lockUser(tx: Tx, phone: string) {
+    const [row] = await tx.$queryRaw<{ user_id: number }[]>`SELECT user_id FROM users WHERE phone = ${phone} FOR UPDATE`;
+    if (!row) return null;
+    return tx.user.findUnique({
+      where: { user_id: row.user_id },
+      select: { user_id: true, is_active: true, is_verified: true, role: true },
+    });
+  }
 
-            if (consumed.count !== 1) throw new BadRequestException(AUTH_ERROR_MESSAGES.OTP_INVALID);
-            return otp;
+  private async issue(tx: Tx, phone: string, type: OtpType, userId: number) {
+    const now = Date.now();
+    const cooldown = Number(this.config.get('OTP_RESEND_COOLDOWN_MS', 60_000));
+    const recent = await tx.otpCode.findMany({
+      where: { phone, type, challenge: { not: null }, created_at: { gte: new Date(now - Math.max(3_600_000, cooldown)) } },
+      orderBy: { created_at: 'desc' },
+      take: 5,
+      select: { created_at: true },
+    });
+    if (recent.length === 5 || (recent[0] && now - recent[0].created_at.getTime() < cooldown)) return;
+    const code = generateOTP(AUTH_CONSTANTS.OTP_LENGTH);
+    const challenge = randomUUID();
+    const expiresAt = new Date(now + AUTH_CONSTANTS.OTP_EXPIRY_SECONDS * 1000);
+    await tx.otpCode.updateMany({ where: { phone, type, is_used: false }, data: { is_used: true } });
+    const otp = await tx.otpCode.create({
+      data: { phone, type, user_id: userId, challenge, code: this.digest(code, challenge, phone, type), expires_at: expiresAt },
+    });
+    await this.sms.enqueueVerification(tx, otp.otp_id, code, expiresAt);
+    return otp.otp_id;
+  }
 
-        } catch (error) {
-            if (error instanceof BadRequestException) {
-                throw error;
-            }
-            this.logger.error('Verification failed');
-            throw new InternalServerErrorException('Failed to verify the code');
-        }
-    }
-
-    async resendOtp(
-        phone: string,
-        type: OtpType,
-        userId?: number
-    ): Promise<number> {
-        const lastOtp = await this.prisma.otpCode.findFirst({
-            where: { phone, type },
-            orderBy: { created_at: 'desc' },
-        });
-
-        if (lastOtp) {
-            const cooldownMs = this.configService.get<number>('OTP_RESEND_COOLDOWN_MS', AUTH_CONSTANTS.OTP_RESEND_LOCK_SECONDS * 1000);
-            const timeDiff = Date.now() - lastOtp.created_at.getTime();
-
-            if (timeDiff < cooldownMs) {
-                const remainingSeconds = Math.ceil((cooldownMs - timeDiff) / 1000);
-                throw new BadRequestException(
-                    `Please wait ${remainingSeconds} seconds before requesting a new code`
-                );
-            }
-        }
-
-        return this.sendOtp(phone, type, userId);
-    }
+  private digest(code: string, challenge: string, phone: string, purpose: OtpType) {
+    const key = this.config.get<string>('OTP_SIGNING_SECRET') ??
+      (this.config.get('NODE_ENV') !== 'production' ? this.config.get<string>('JWT_REFRESH_SECRET') : undefined);
+    if (!key) throw new ServiceUnavailableException('Verification is unavailable');
+    return hashOTP(code, key, challenge, phone, purpose);
+  }
 }

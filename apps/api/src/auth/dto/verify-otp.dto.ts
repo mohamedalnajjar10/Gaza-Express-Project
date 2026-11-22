@@ -1,18 +1,9 @@
 import { IsString, IsNotEmpty, Length, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AUTH_CONSTANTS } from '../constants/auth.constants';
+import { RegistrationProfileDto } from './register.dto';
 
-export class VerifyOtpDto {
-    @ApiProperty({
-        example: '0599123456',
-        description: 'Phone number',
-        required: true,
-    })
-    @IsString()
-    @IsNotEmpty()
-    @Matches(/^0(59|56)\d{7}$/)
-    phone: string;
-
+export class VerifyOtpDto extends RegistrationProfileDto {
     @ApiProperty({
         example: '123456',
         description: 'Verification code',

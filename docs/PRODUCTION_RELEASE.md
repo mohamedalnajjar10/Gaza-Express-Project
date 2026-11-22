@@ -11,7 +11,7 @@
 
 - Take a consistent encrypted database backup and record the restore point. Restore it into a separate database and verify critical row counts, an order and its payment ledger, and the new application reads. Record restore time and data loss against the required RTO and RPO.
 - Run the migrator once with migration credentials. Deploy API and worker images. Check `/api/v1/health` and `/api/v1/ready`, then exercise signup, login, checkout, confirmation, delivery and settlement with test identities. Keep the previous image available. Check migration compatibility before any image rollback.
-- Run a deployment rehearsal on staging, including a dependency interruption. A readiness failure returns HTTP 503 and liveness remains independent. Configure the live orchestrator or load balancer to use readiness for routing. Compose health status alone does not remove a backend from Nginx.
+- Run a deployment rehearsal on staging, including a dependency interruption. A readiness failure returns HTTP 503 and liveness remains independent. HAProxy in Compose actively checks database routing readiness. Configure the target load balancer to apply the same routing policy.
 - Collect latency, errors, MySQL saturation, Redis memory, queue age and failed or uncertain SMS deliveries. Set ownership for alerts. Run the load profiles with production-like data and request mix. Record p95/p99, throughput and failure rates. The local run in `PERFORMANCE.md` is the baseline.
 
 ## Google frontend integration
@@ -21,3 +21,13 @@
 ## Store operations
 
 A store owner creates a pending store. An admin lists pending stores at `GET /api/v1/stores/moderation` and sends `PATCH /api/v1/stores/:id/moderation` with `expectedStatus`, `status` and a `reason`. The application records the actor and transition in the same transaction and invalidates the catalog cache. When a store has moderation history, archive it via status instead of hard-deleting it.
+
+
+## Before deploying the backend remediation
+
+- Take and restore a database backup in staging. Inspect assigned and in-transit orders for duplicate driver assignments before applying the driver reservation backfill. Resolve each conflicting assignment through operations.
+- Pause order writes and stop old API and worker replicas before applying the sales projection and OTP migrations. Deploy the new API and web client together for the updated registration, stock availability and store availability contracts. The OTP migration retires old codes and removes their queued secret payloads. Users can request a new code immediately, subject to the usual endpoint rate limits. Production SMS needs an independent `OTP_SIGNING_SECRET`.
+- Inject a non-DDL runtime account, an independent migrator account and an account for the worker. Compose reads `COMPOSE_RUNTIME_DATABASE_URL`, `COMPOSE_MIGRATION_DATABASE_URL` and `COMPOSE_WORKER_DATABASE_URL` on the host and passes each service only its own `DATABASE_URL`. Use a TLS-enabled Redis ACL with a separate cache and rate-limit store in production via `COMPOSE_RATE_REDIS_URL` and `COMPOSE_CATALOG_CACHE_URL`. Keep the Compose defaults for local use.
+- Route traffic using `/api/v1/routing-ready`. The full `/api/v1/ready` probe also checks the rate-limit store. Keep authentication, writes and webhooks unavailable while its shared limits are down. Catalog reads have a bounded per-process fallback.
+- Schedule `npm run maintenance:prune` on a protected runner with database credentials. Start with one daily execution and monitor the per-batch counts. Defaults retain expired OTPs for 7 days, expired refresh sessions and resolved SMS records for 30 days, and read notifications for 180 days. Unresolved SMS and unread notifications remain available. Check these periods against the deployment's retention policy before scheduling.
+- In SMS operations, inspect queue age and the Twilio message records for uncertain deliveries. After obtaining evidence, an admin can record a final result with `PATCH /api/v1/notifications/sms-queue/:id/resolution`. Verify SMS tracking and the acknowledged refund/return workflows during staging rehearsal.

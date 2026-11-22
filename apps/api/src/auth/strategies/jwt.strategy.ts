@@ -8,6 +8,7 @@ import { AUTH_ERROR_MESSAGES } from '../constants/auth.constants';
 
 export interface JwtPayload {
     sub: number;
+    sessionVersion?: number;
     phone: string;
     role: string;
     isActive: boolean;
@@ -22,6 +23,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         super({
             jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
             ignoreExpiration: false,
+            algorithms: ['HS256'],
             secretOrKey: configService.get<string>('JWT_SECRET'),
         });
     }
@@ -34,7 +36,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         if (!user) {
             throw new UnauthorizedException(AUTH_ERROR_MESSAGES.USER_NOT_FOUND);
         }
-        if (!user.is_active) {
+        if (!user.is_active || !user.is_verified || (user.sessionVersion ?? 0) !== (payload.sessionVersion ?? 0)) {
             throw new UnauthorizedException(AUTH_ERROR_MESSAGES.ACCOUNT_DEACTIVATED);
         }
         return user;

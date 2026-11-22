@@ -1,5 +1,6 @@
 services:
   minio:
+    networks: [data]
     image: wasla-minio:community
     build:
       context: ./infra
@@ -11,6 +12,7 @@ services:
     volumes: [minio-data:/data]
     restart: unless-stopped
   minio-init:
+    networks: [data]
     image: wasla-minio:community
     pull_policy: never
     depends_on:
@@ -36,6 +38,7 @@ services:
         mc admin policy create local product-media /policy.json
         mc admin policy attach local product-media --user "$$PRODUCT_MEDIA_ACCESS_KEY"
   mysql:
+    networks: [data]
     image: mysql:8.4
     environment:
       MYSQL_DATABASE: ${DOCKER_DB_NAME:-wasla}
@@ -52,6 +55,7 @@ services:
   redis:
     image: redis:7.4-alpine
     command: [redis-server, --appendonly, 'yes', --maxmemory, 256mb, --maxmemory-policy, noeviction]
+    networks: [data]
     volumes: [redis-data:/data]
     healthcheck:
       test: [CMD, redis-cli, ping]
@@ -61,6 +65,7 @@ services:
   catalog-cache:
     image: redis:7.4-alpine
     command: [redis-server, --save, '', --appendonly, 'no', --maxmemory, 128mb, --maxmemory-policy, allkeys-lru]
+    networks: [data]
     healthcheck:
       test: [CMD, redis-cli, ping]
       interval: 5s
@@ -68,58 +73,95 @@ services:
       retries: 10
     restart: unless-stopped
   migrate:
+    networks: [data]
     build:
       context: ./apps/api
       target: migrator
     command: [npx, prisma, migrate, deploy]
     environment:
-      DATABASE_URL: mysql://gaza:${DOCKER_DB_PASSWORD}@mysql:3306/${DOCKER_DB_NAME:-wasla}
+      DATABASE_URL: ${COMPOSE_MIGRATION_DATABASE_URL:-mysql://gaza:${DOCKER_DB_PASSWORD}@mysql:3306/${DOCKER_DB_NAME:-wasla}}
     depends_on:
       mysql: {condition: service_healthy}
   api:
+    networks: [data, routing]
     scale: ${API_REPLICAS:-2}
     build: ./apps/api
-    env_file: .env
     environment:
+      NODE_ENV: ${NODE_ENV:-production}
       PORT: 5050
+      API_PREFIX: ${API_PREFIX:-api/v1}
       TRUST_PROXY: "1"
+      FRONTEND_URL:
+      CORS_ORIGIN:
+      JWT_SECRET:
+      JWT_REFRESH_SECRET:
+      JWT_EXPIRES_IN:
+      JWT_REFRESH_EXPIRES_IN:
+      GOOGLE_AUTH_ENABLED: ${GOOGLE_AUTH_ENABLED:-false}
+      GOOGLE_CLIENT_ID:
+      GOOGLE_CLIENT_SECRET:
+      GOOGLE_CALLBACK_URL:
+      RATE_LIMIT_TTL:
+      RATE_LIMIT_MAX_REQUESTS:
+      OTP_RESEND_COOLDOWN_MS:
+      OTP_SIGNING_SECRET:
+      SMS_PROVIDER: ${SMS_PROVIDER:-disabled}
+      SMS_OUTBOX_KEY:
+      DELIVERY_CODE_SECRET:
+      PLATFORM_COMMISSION_BPS:
+      DRIVER_FEE_ILS:
+      BANK_TRANSFER_INSTRUCTIONS:
+      WHATSAPP_PHONE_NUMBER_ID:
+      WHATSAPP_APP_SECRET:
+      WHATSAPP_VERIFY_TOKEN:
+      PAYMENT_SANDBOX_SECRET:
       PRODUCT_MEDIA_ENDPOINT: http://minio:9000
-      MINIO_ROOT_USER: ""
-      MINIO_ROOT_PASSWORD: ""
-      CATALOG_CACHE_URL: redis://catalog-cache:6379
-      REDIS_URL: redis://redis:6379
-      DATABASE_URL: mysql://gaza:${DOCKER_DB_PASSWORD}@mysql:3306/${DOCKER_DB_NAME:-wasla}?connection_limit=10&pool_timeout=10
+      PRODUCT_MEDIA_ACCESS_KEY:
+      PRODUCT_MEDIA_SECRET_KEY:
+      CATALOG_CACHE_URL: ${COMPOSE_CATALOG_CACHE_URL:-redis://catalog-cache:6379}
+      REDIS_URL: ${COMPOSE_RATE_REDIS_URL:-redis://redis:6379}
+      DATABASE_URL: ${COMPOSE_RUNTIME_DATABASE_URL:-mysql://gaza:${DOCKER_DB_PASSWORD}@mysql:3306/${DOCKER_DB_NAME:-wasla}?connection_limit=10&pool_timeout=10}
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       minio-init: {condition: service_completed_successfully}
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://localhost:5050/api/v1/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: [CMD, node, -e, "fetch('http://localhost:5050/api/v1/routing-ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 5
     restart: unless-stopped
   sms-worker:
+    networks: [data]
+    stop_grace_period: 30s
     scale: ${SMS_WORKER_REPLICAS:-1}
     build: ./apps/api
     profiles: [sms]
     command: [node, dist/src/sms/main.js]
-    env_file: .env
     environment:
-      MINIO_ROOT_USER: ""
-      MINIO_ROOT_PASSWORD: ""
-      PRODUCT_MEDIA_ACCESS_KEY: ""
-      PRODUCT_MEDIA_SECRET_KEY: ""
-      DATABASE_URL: mysql://gaza:${DOCKER_DB_PASSWORD}@mysql:3306/${DOCKER_DB_NAME:-wasla}?connection_limit=5&pool_timeout=10
+      NODE_ENV: ${NODE_ENV:-production}
+      SMS_PROVIDER: ${SMS_PROVIDER:-disabled}
+      SMS_OUTBOX_KEY:
+      TWILIO_ACCOUNT_SID:
+      TWILIO_AUTH_TOKEN:
+      TWILIO_MESSAGING_SERVICE_SID:
+      DATABASE_URL: ${COMPOSE_WORKER_DATABASE_URL:-mysql://gaza:${DOCKER_DB_PASSWORD}@mysql:3306/${DOCKER_DB_NAME:-wasla}?connection_limit=5&pool_timeout=10}
     depends_on:
       migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  api-router:
+    image: haproxy:3.2@sha256:1242e4006ac3f1ed15871efadca3d8d089e76f720017a1c51747133ee40cc953
+    volumes: ['./infra/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro']
+    networks: [default, routing]
+    depends_on:
+      api: {condition: service_healthy}
     restart: unless-stopped
   gateway:
     image: nginx:1.28-alpine
     ports: ['127.0.0.1:${GATEWAY_PORT:-5050}:80']
     volumes: ['./infra/nginx.conf:/etc/nginx/nginx.conf:ro']
     depends_on:
-      api: {condition: service_healthy}
+      api-router: {condition: service_started}
     restart: unless-stopped
   k6:
     image: grafana/k6:1.0.0
@@ -130,3 +172,8 @@ volumes:
   minio-data:
   mysql-data:
   redis-data:
+
+networks:
+  data: {}
+  routing:
+    internal: true

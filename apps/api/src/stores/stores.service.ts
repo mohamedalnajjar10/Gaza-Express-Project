@@ -188,24 +188,28 @@ export class StoresService {
     return updated;
   }
 
-  async toggleStatus(userId: number, storeId: number) {
-    const store = await this.assertOwnership(userId, storeId);
-    const newStatus = store.isOpenNow ? false : true;
-    const updated = await this.prisma.store.update({
-      where: { storeId },
-      data: { isOpenNow: newStatus },
-    });
+  async toggleStatus(userId: number, storeId: number, isOpenNow: boolean) {
+    await this.assertOwnership(userId, storeId);
+    const updated = await this.prisma.store.update({ where: { storeId, ownerId: userId }, data: { isOpenNow } });
     await this.cache.invalidate();
     return updated;
   }
 
   async delete(userId: number, storeId: number) {
     await this.assertOwnership(userId, storeId);
-    await this.prisma.store.delete({ where: { storeId } });
+    await this.prisma.$transaction(async tx => {
+      const [store] = await tx.$queryRaw<{ status: StoreStatus }[]>`
+        SELECT status FROM stores WHERE store_id = ${storeId} AND owner_id = ${userId} FOR UPDATE`;
+      if (!store) throw new NotFoundException('Store not found');
+      if (store.status === 'INACTIVE') return;
+      await tx.store.update({ where: { storeId }, data: { status: 'INACTIVE', isOpenNow: false } });
+      await tx.storeModerationEvent.create({
+        data: { storeId, actorId: userId, fromStatus: store.status, toStatus: 'INACTIVE', reason: 'Archived by store owner' },
+      });
+    });
     await this.cache.invalidate();
-    return { message: 'Store has been deleted successfully' };
+    return { message: 'Store archived successfully' };
   }
-
 
   async findMyStores(userId: number, page = new PageDto()) {
     return this.prisma.store.findMany({

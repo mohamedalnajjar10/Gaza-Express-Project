@@ -1,6 +1,7 @@
 import { IsString, IsNotEmpty, IsOptional, IsEmail, IsEnum, MaxLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
+import { PasswordBytes } from '../../auth/dto/password-bytes';
 
 export class CreateUserDto {
     @ApiProperty({ example: '0599123456' })
@@ -18,6 +19,7 @@ export class CreateUserDto {
     @ApiProperty({ example: 'password123' })
     @IsString()
     @IsNotEmpty()
+    @PasswordBytes()
     password: string;
 
     @ApiProperty({ example: 'Mohammed Ahmed', required: false })

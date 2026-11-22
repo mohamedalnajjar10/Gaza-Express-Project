@@ -14,7 +14,7 @@ export function trackEndpoints(app: INestApplication) {
     }
   }
   app.use((req: Request, res: Response, next: NextFunction) => {
-    res.once('finish', () => {
+    res.once('close', () => {
       if (typeof req.route?.path === 'string') appendFileSync(join(directory, 'hits'), `${req.method} ${req.route.path} ${res.statusCode}\n`);
     });
     next();

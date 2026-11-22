@@ -1,16 +1,14 @@
+import type { AuthenticatedRequest } from '../common/authenticated-request';
 import {
   Body, Controller, ForbiddenException, Get, Header, Headers, HttpCode, NotFoundException,
   Param, ParseIntPipe, Patch, Post, Query, Req, Res, UseGuards, type RawBodyRequest,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { UserRole } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { Request, Response } from 'express';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { BankReconciliationDto, DriverApprovalDto, DriverAvailabilityDto, SettlementDto } from './finance.dto';
 import { FinanceService } from './finance.service';
-
-type AuthRequest = { user: { user_id: number; role: UserRole } };
 
 @Controller()
 @UseGuards(JwtAuthGuard)
@@ -18,29 +16,38 @@ export class FinanceController {
   constructor(private readonly finance: FinanceService) {}
 
   @Patch('drivers/:id/approval')
-  approve(@Req() req: AuthRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: DriverApprovalDto) {
+  approve(@Req() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: DriverApprovalDto) {
     return this.finance.setDriverApproval(req.user, id, dto.approved);
   }
 
+  @Get('drivers/me/availability')
+  driverAvailability(@Req() req: AuthenticatedRequest) { return this.finance.driverAvailability(req.user); }
+
   @Patch('drivers/me/availability')
-  availability(@Req() req: AuthRequest, @Body() dto: DriverAvailabilityDto) {
-    return this.finance.setAvailability(req.user, dto.available);
+  availability(@Req() req: AuthenticatedRequest, @Body() dto: DriverAvailabilityDto) {
+    return this.finance.setAvailability(req.user, dto);
   }
 
   @Get('orders/:id/payment')
-  status(@Req() req: AuthRequest, @Param('id', ParseIntPipe) id: number) {
+  status(@Req() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number) {
     return this.finance.status(req.user, id);
   }
 
   @Post('orders/:id/payment/bank-reconciliation')
   @HttpCode(200)
-  reconcile(@Req() req: AuthRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: BankReconciliationDto) {
+  reconcile(@Req() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: BankReconciliationDto) {
     return this.finance.reconcileBank(req.user, id, dto.amount, dto.currency, dto.reference);
+  }
+
+  @Post('orders/:id/payment/refund')
+  @HttpCode(200)
+  refund(@Req() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: BankReconciliationDto) {
+    return this.finance.recordRefund(req.user, id, dto.amount, dto.currency, dto.reference);
   }
 
   @Post('orders/:id/settlements')
   @HttpCode(200)
-  settle(@Req() req: AuthRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: SettlementDto) {
+  settle(@Req() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: SettlementDto) {
     return this.finance.settle(req.user, id, dto.kind, dto.reference);
   }
 }

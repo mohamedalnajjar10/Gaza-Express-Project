@@ -1,11 +1,19 @@
 import { BadRequestException } from '@nestjs/common';
 import { OtpService } from './otp.service';
 import { OtpType } from '@prisma/client';
-describe('OTP compare-and-set', () => {
-  it('rejects a request that loses the consume race', async () => {
-    const prisma = { otpCode: { findFirst: jest.fn().mockResolvedValue({ otp_id: 1 }), updateMany: jest.fn().mockResolvedValue({ count: 0 }) } };
+
+describe('OTP finalization', () => {
+  it('rejects an already verified account after acquiring the account lock', async () => {
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ user_id: 1 }]),
+      user: { findUnique: jest.fn().mockResolvedValue({ user_id: 1, is_active: true, is_verified: true }) },
+      otpCode: { findFirst: jest.fn() },
+    };
+    const prisma = { $transaction: (run: (client: typeof tx) => unknown) => run(tx) };
     const service = new OtpService(prisma as any, {} as any, {} as any);
-    await expect(service.verifyOtp('0591234567', '123456', OtpType.PHONE_VERIFICATION)).rejects.toBeInstanceOf(BadRequestException);
-    expect(prisma.otpCode.updateMany).toHaveBeenCalledWith({ where: { otp_id: 1, is_used: false, expires_at: { gt: expect.any(Date) } }, data: { is_used: true } });
+    const finish = jest.fn();
+    await expect(service.verifyOtp('0591234567', '123456', OtpType.PHONE_VERIFICATION, finish)).rejects.toBeInstanceOf(BadRequestException);
+    expect(tx.otpCode.findFirst).not.toHaveBeenCalled();
+    expect(finish).not.toHaveBeenCalled();
   });
 });

@@ -2,7 +2,7 @@ import {
     IsString,
     IsNotEmpty,
     MinLength,
-    IsOptional,
+    IsOptional, MaxLength,
     IsEmail,
     Matches,
     IsEnum,
@@ -11,6 +11,7 @@ import {
 import { ApiProperty } from '@nestjs/swagger';
 import { AUTH_CONSTANTS } from '../constants/auth.constants';
 import { UserRole } from '@prisma/client';
+import { PasswordBytes } from './password-bytes';
 
 export class RegisterDto {
     @ApiProperty({
@@ -24,22 +25,28 @@ export class RegisterDto {
         message: 'Phone number must start with 059 or 056 and consist of 10 digits',
     })
     phone: string;
+}
 
+export class RegistrationProfileDto extends RegisterDto {
     @ApiProperty({ example: 'Mohammed Ahmed', description: 'Full name', required: true })
     @IsString()
     @IsNotEmpty()
     @MinLength(3, { message: 'Full name must be at least 3 characters' })
+    @MaxLength(100)
+    @Matches(/\S/)
     full_name: string;
 
     @ApiProperty({ example: 'Mohammed Ahmed', description: 'Name in English', required: false })
     @IsString()
     @IsOptional()
+    @MaxLength(100)
     full_name_ar?: string;
 
-    @ApiProperty({ example: 'password123', description: 'Password', required: true })
+    @ApiProperty({ example: 'Example!Pass42', description: 'Password', required: true })
     @IsNotEmpty()
     @IsString()
     @MinLength(AUTH_CONSTANTS.MIN_PASSWORD_LENGTH)
+    @PasswordBytes()
     @Matches(/(?=.*[a-z])/, { message: 'Password must contain a lowercase letter' })
     @Matches(/(?=.*[A-Z])/, { message: 'Password must contain an uppercase letter' })
     @Matches(/(?=.*\d)/, { message: 'Password must contain a number' })
@@ -49,12 +56,13 @@ export class RegisterDto {
 
     @ApiProperty({ example: 'user@example.com', description: 'Email', required: false })
     @IsEmail({}, { message: 'Invalid email format' })
+    @MaxLength(255)
     @IsOptional()
     email?: string;
 
     @ApiProperty({
         example: 'customer',
-        description: 'User role: customer, store_owner, driver, admin',
+        description: 'Self-registration role: customer, store_owner or driver',
         required: false,
         enum: UserRole,
     })

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { ArrowLeft, ShieldCheck, Store, Truck } from 'lucide-react';
 import { useIdentity } from '../../shared/auth/identity';
 import { Busy } from '../../shared/ui/feedback';
+import { DeliveryCompanyAdmin, DeliveryCompanyQueue } from './delivery-partners';
 
 const OwnerStores = lazy(() => import('./owner-stores'));
 const Availability = lazy(() => import('./driver-availability'));
@@ -27,6 +28,8 @@ export default function Operations() {
         </div>
         <Link className="button" to="/orders">{action}<ArrowLeft size={17} aria-hidden="true" /></Link>
       </section>
+      {profile.role === 'admin' && <DeliveryCompanyAdmin />}
+      {profile.role === 'store_owner' && <DeliveryCompanyQueue />}
       <Suspense fallback={<Busy />}>
         <Panel />
       </Suspense>

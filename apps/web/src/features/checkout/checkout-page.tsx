@@ -1,5 +1,9 @@
 import { useRewards } from '../account/rewards';
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
+import { MapPin } from 'lucide-react';
+import { useIdentity } from '../../shared/auth/identity';
+import { AddressEditor } from '../addresses/address-editor';
+import '../addresses/addresses.css';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { ApiError, api, json } from '../../shared/api/client';
 import { getCart } from '../cart/cart-api';
@@ -11,6 +15,10 @@ import { useResource } from '../../shared/hooks/use-resource';
 
 export default function Checkout() {
   const rewards = useRewards();
+  const { profile, refreshProfile } = useIdentity();
+  const [editingAddress, setEditingAddress] = useState(false);
+  const [selectedAddressId, setSelectedAddressId] = useState<number>();
+  const selectedAddress = (addresses: Awaited<ReturnType<typeof getAddresses>>) => addresses.find(item => item.id === selectedAddressId) ?? addresses.find(item => item.id === profile?.defaultAddressId) ?? addresses[0];
   const navigate = useNavigate();
   const location = useLocation();
   const attempt = useRef<{ signature: string; key: string } | undefined>(
@@ -30,12 +38,12 @@ export default function Checkout() {
         {([cart, addresses]) =>
           !cart.items.length ? (
             <Empty title="السلّة فارغة" />
-          ) : !addresses.length ? (
-            <Empty title="أضف عنوان توصيل للمتابعة">
-              <Link className="button" to="/addresses">
-                إضافة عنوان
-              </Link>
-            </Empty>
+          ) : !addresses.length || editingAddress ? (
+            <div className="address-page">
+              <AddressEditor address={editingAddress ? selectedAddress(addresses) : undefined}
+                onCancel={addresses.length ? () => setEditingAddress(false) : undefined}
+                onSaved={async saved => { setSelectedAddressId(saved?.id); await refreshProfile(); setEditingAddress(false); data.reload(); }} />
+            </div>
           ) : (
             <section className="surface padded narrow">
               <p>
@@ -46,7 +54,7 @@ export default function Checkout() {
                 label="تأكيد الطلب"
                 submit={async fields => {
                   const payload = {
-                    addressId: Number(fields.get('addressId')),
+                    addressId: selectedAddress(addresses).id,
                     cartVersion: cart.version,
                     paymentMethod: fields.get('paymentMethod'),
                     ...(location.state?.storeId === cart.storeId && location.state?.note && { note: location.state.note }),
@@ -60,7 +68,7 @@ export default function Checkout() {
                       ...json('POST', payload),
                       headers: { 'Idempotency-Key': attempt.current.key },
                     });
-                    navigate(`/orders/${order.id}`, { replace: true });
+                    navigate(`/orders/${order.id}`, { replace: true, state: { submitted: true } });
                   } catch (error) {
                     if (error instanceof ApiError && error.status === 409)
                       { data.reload(); rewards.reload(); }
@@ -68,16 +76,14 @@ export default function Checkout() {
                   }
                 }}
               >
-                <label>
-                  عنوان التوصيل
-                  <select name="addressId">
-                    {addresses.map(a => (
-                      <option value={a.id} key={a.id}>
-                        {a.label} — {a.address}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <div className="checkout-address-card">
+                  <MapPin size={23} />
+                  <div><strong>عنوان التوصيل</strong><p>{selectedAddress(addresses).address}</p></div>
+                  <button type="button" className="secondary" onClick={() => setEditingAddress(true)}>تعديل</button>
+                </div>
+                {addresses.length > 1 && <label>اختر عنواناً محفوظاً<select name="addressId" value={selectedAddress(addresses).id} onChange={event => setSelectedAddressId(Number(event.target.value))}>
+                  {addresses.map(address => <option value={address.id} key={address.id}>{address.label} — {address.address}</option>)}
+                </select></label>}
                 <label>
                   طريقة الدفع
                   <select name="paymentMethod">

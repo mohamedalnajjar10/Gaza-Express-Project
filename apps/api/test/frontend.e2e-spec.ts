@@ -1,3 +1,4 @@
+import * as bcrypt from 'bcrypt';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -107,18 +108,25 @@ describe('Frontend HTTP contracts', () => {
   it('registers, resends, verifies, signs in, reads the profile and logs out', async () => {
     const signup = { phone, password, full_name: 'Endpoint fixture' };
     await call('post', '/auth/register').send({ ...signup, role: 'admin' }).expect(400);
-    const registered = await call('post', '/auth/register').send(signup).expect(201);
-    expect(registered.body).toMatchObject({ success: true, data: { otp_id: expect.any(Number) } });
-    await call('post', '/auth/login').send({ phone, password }).expect(403);
-    await call('post', '/auth/resend-otp').send({ phone }).expect(400);
-    await db.otpCode.update({ where: { otp_id: registered.body.data.otp_id }, data: { created_at: new Date(0) } });
-    const resent = await call('post', '/auth/resend-otp').send({ phone }).expect(200);
-    const job = await db.smsJob.findUniqueOrThrow({ where: { otpId: resent.body.data.otp_id } });
+    const registered = await call('post', '/auth/register').send({ phone }).expect(201);
+    expect(registered.body.data).not.toHaveProperty('otp_id');
+    const pending = await db.user.findUniqueOrThrow({ where: { phone } });
+    expect(pending.password_hash).toBe('');
+    await db.user.update({ where: { phone }, data: { password_hash: await bcrypt.hash('Old!Pass123', 4) } });
+    await call('post', '/auth/login').send({ phone, password }).expect(401);
+    await call('post', '/auth/resend-otp').send({ phone }).expect(200);
+    const issued = await db.otpCode.findFirstOrThrow({ where: { phone }, orderBy: { otp_id: 'desc' } });
+    await db.otpCode.update({ where: { otp_id: issued.otp_id }, data: { created_at: new Date(0) } });
+    await call('post', '/auth/resend-otp').send({ phone }).expect(200);
+    const latest = await db.otpCode.findFirstOrThrow({ where: { phone }, orderBy: { otp_id: 'desc' } });
+    const job = await db.smsJob.findUniqueOrThrow({ where: { otpId: latest.otp_id } });
     const code = app.get(SmsService).decrypt(job);
     const wrong = code === '000000' ? '000001' : '000000';
-    await call('post', '/auth/verify-otp').send({ phone, code: wrong }).expect(400);
-    await call('post', '/auth/verify-otp').send({ phone, code }).expect(200);
-    await call('post', '/auth/verify-otp').send({ phone, code }).expect(400);
+    await call('post', '/auth/verify-otp').send({ ...signup, code: wrong }).expect(400);
+    expect((await db.otpCode.findUniqueOrThrow({ where: { otp_id: latest.otp_id } })).attempts).toBe(1);
+    await call('post', '/auth/verify-otp').send({ ...signup, code }).expect(200);
+    await call('post', '/auth/verify-otp').send({ ...signup, code }).expect(400);
+    await call('post', '/auth/login').send({ phone, password: 'Old!Pass123' }).expect(401);
     await call('post', '/auth/login').send({ phone, password: 'wrong-password' }).expect(401);
     const login = await call('post', '/auth/login').send({ phone, password }).expect(200);
     const session = login.body.data.tokens;
@@ -129,6 +137,11 @@ describe('Frontend HTTP contracts', () => {
     await call('get', '/auth/profile').expect(401);
     await call('post', '/auth/logout', 'registered').send({ refresh_token: session.refresh_token }).expect(200);
     await call('post', '/auth/refresh').send({ refresh_token: session.refresh_token }).expect(401);
+    const beforeReset = (await call('post', '/auth/login').send({ phone, password }).expect(200)).body.data.tokens;
+    await call('patch', `/users/${pending.user_id}`, 'admin').send({ password: 'Changed!Pass42' }).expect(200);
+    tokens.set('registered', beforeReset.access_token);
+    await call('get', '/auth/profile', 'registered').expect(401);
+    await call('post', '/auth/refresh').send({ refresh_token: beforeReset.refresh_token }).expect(401);
   });
 
   it('exercises Google initiation, callback and one-time exchange with a simulated provider', async () => {
@@ -211,7 +224,7 @@ describe('Frontend HTTP contracts', () => {
     await call('get', `/stores?categoryId=${categoryId}`, 'customer').expect(200);
     await call('get', '/stores/top-rated?limit=101', 'customer').expect(400);
     await call('get', '/stores/top-rated', 'customer').expect(200);
-    await call('patch', `/stores/${storeId}/toggle-status`, 'owner').expect(200);
+    await call('patch', `/stores/${storeId}/toggle-status`, 'owner').send({ isOpenNow: true }).expect(200);
     const pc = await call('post', '/product-categories', 'owner').send({ storeId, nameAr: 'Fixture products' }).expect(201);
     const prodCategoryId = pc.body.data.prodCategoryId;
     await call('get', `/product-categories?storeId=${storeId}`, 'customer').expect(200);
@@ -245,10 +258,12 @@ describe('Frontend HTTP contracts', () => {
     expect(search.body.data.map(row => row.productId)).toContain(productId);
     await call('get', `/products/search/${storeId}`, 'customer').expect(400);
     await call('patch', `/products/${productId}`, 'owner').send({ nameEn: 'Renamed fixture' }).expect(200);
-    await call('patch', `/products/${productId}/toggle-availability`, 'owner').expect(200);
+    await call('patch', `/products/${productId}/toggle-availability`, 'owner').send({ isAvailable: false }).expect(200);
     const unavailable = await call('get', `/products/store/${storeId}`, 'customer').expect(200);
     expect(unavailable.body.data).toEqual([]);
-    await call('patch', `/products/${productId}/toggle-availability`, 'owner').expect(200);
+    await call('get', `/products/store/${storeId}?availableOnly=false`, 'customer').expect(403);
+    await call('get', `/products/${productId}`, 'customer').expect(404);
+    await call('patch', `/products/${productId}/toggle-availability`, 'owner').send({ isAvailable: true }).expect(200);
     for (const [kind, id] of [['stores', storeId], ['products', productId]] as const) {
       await call('post', `/favorites/${kind}/${id}`, 'customer').expect(201);
       await call('post', `/favorites/${kind}/${id}`, 'customer').expect(409);
@@ -267,6 +282,40 @@ describe('Frontend HTTP contracts', () => {
     const disposable = await call('post', '/stores', 'owner').send({ ...storeBody, storeName: 'Disposable fixture' }).expect(201);
     stores.push(disposable.body.data.storeId);
     await call('delete', `/stores/${disposable.body.data.storeId}`, 'owner').expect(200);
+    expect(await db.store.findUnique({ where: { storeId: disposable.body.data.storeId } })).toMatchObject({ status: 'INACTIVE' });
+  });
+
+  it('persists onboarding and upserts one default address across concurrent retries', async () => {
+    const before = await call('get', '/auth/profile', 'stranger').expect(200);
+    expect(before.body.data.addressPromptedAt).toBeNull();
+    await call('patch', '/addresses/onboarding', 'stranger').expect(200);
+    const skipped = await call('get', '/auth/profile', 'stranger').expect(200);
+    expect(skipped.body.data.addressPromptedAt).toEqual(expect.any(String));
+    await call('patch', '/addresses/onboarding', 'stranger').expect(200);
+    expect((await call('get', '/auth/profile', 'stranger')).body.data.addressPromptedAt).toBe(skipped.body.data.addressPromptedAt);
+    const payload = {
+      label: 'بيتي', address: 'غزة، شارع الوحدة، مبنى ٢', latitude: 31.5017, longitude: 34.4668,
+      area: 'غزة', residenceType: 'APARTMENT', building: 'مبنى ٢، شقة ٤', floor: 'الثاني',
+      street: 'شارع الوحدة', phone: '+970591234567', directions: 'بجوار الصيدلية',
+    };
+    const results = await Promise.all([0, 1].map(() => call('put', '/addresses/default', 'stranger').send(payload).expect(200)));
+    expect(results[0].body.data.id).toBe(results[1].body.data.id);
+    const addressId = results[0].body.data.id;
+    const saved = await call('get', '/addresses', 'stranger').expect(200);
+    expect(saved.body.data).toHaveLength(1);
+    expect(saved.body.data[0]).toMatchObject({ area: payload.area, directions: payload.directions, residenceType: 'APARTMENT' });
+    expect((await call('get', '/auth/profile', 'stranger')).body.data.defaultAddressId).toBe(addressId);
+    await call('put', `/addresses/${addressId}`, 'customer').send(payload).expect(404);
+    await call('put', '/addresses/default', 'stranger').send({ ...payload, phone: 'not-a-number' }).expect(400);
+    await call('put', `/addresses/${addressId}`, 'stranger').send({ ...payload, floor: 'الثالث' }).expect(200);
+    const edited = await call('get', '/addresses', 'stranger').expect(200);
+    expect(edited.body.data[0].floor).toBe('الثالث');
+    await call('delete', `/addresses/${addressId}`, 'stranger').expect(204);
+    expect((await call('get', '/auth/profile', 'stranger')).body.data.defaultAddressId).toBeNull();
+    for (const actor of ['owner', 'admin']) {
+      const savedStaff = await call('put', '/addresses/default', actor).send(payload).expect(200);
+      await call('delete', `/addresses/${savedStaff.body.data.id}`, actor).expect(204);
+    }
   });
 
   it('validates address ownership and exposes paginated lists and admin queue status', async () => {
@@ -285,6 +334,10 @@ describe('Frontend HTTP contracts', () => {
     expect(orders.body.data).toEqual({ orders: [], nextBefore: null });
     await call('get', '/notifications/sms-queue', 'customer').expect(403);
     await call('get', '/notifications/sms-queue', 'admin').expect(200);
+    const job = await db.smsJob.findFirstOrThrow({ where: { otpId: { gt: 0 } }, orderBy: { createdAt: 'desc' } });
+    await db.smsJob.update({ where: { id: job.id }, data: { status: 'UNKNOWN', payload: null } });
+    await call('patch', `/notifications/sms-queue/${job.id}/resolution`, 'admin')
+      .send({ status: 'FAILED', reason: 'Confirmed in provider records' }).expect(200);
     config.set('WHATSAPP_VERIFY_TOKEN', 'fixture-webhook-token');
     const handshake = (token: string) => call('get', '/webhooks/whatsapp').query({ 'hub.mode': 'subscribe', 'hub.verify_token': token, 'hub.challenge': '12345' });
     await handshake('wrong').expect(403);

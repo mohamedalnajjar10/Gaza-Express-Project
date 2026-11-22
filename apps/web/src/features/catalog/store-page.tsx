@@ -33,6 +33,7 @@ function StoreCatalog({ id }: { id?: string }) {
       >(`/stores/${id}`, { signal }),
     `store:${id}`,
   );
+  const [catalogMode, setCatalogMode] = useState<'best' | 'all'>('best');
   const [section, setSection] = useState<number>();
   const [subsection, setSubsection] = useState<number>();
   const activeCategory = subsection ?? section;
@@ -40,7 +41,7 @@ function StoreCatalog({ id }: { id?: string }) {
     signal => api<Section[]>(`/product-categories?storeId=${id}&limit=100`, { signal }),
     `store-sections:${id}`,
   );
-  const showBestSellers = !activeCategory && !query;
+  const showBestSellers = catalogMode === 'best' && !activeCategory && !query;
   const products = useResource(
     signal =>
       profile
@@ -48,7 +49,7 @@ function StoreCatalog({ id }: { id?: string }) {
             signal,
           })
         : Promise.resolve([]),
-    `store-products:${id}:${page}:${activeCategory}:${query}:${profile?.user_id}`,
+    `store-products:${id}:${page}:${catalogMode}:${activeCategory}:${query}:${profile?.user_id}`,
   );
   const basket = useStoreCart(Number(id), profile?.role === 'customer');
   const cartCount = basket.cart?.items.reduce((sum, item) => sum + item.quantity, 0) ?? 0;
@@ -64,6 +65,7 @@ function StoreCatalog({ id }: { id?: string }) {
       ?? previews.find(item => item.parentId === category.prodCategoryId && item.products?.some(product => product.imageUrl))?.products?.find(product => product.imageUrl)?.imageUrl;
   }
   function choose(root?: number, child?: number) {
+    setCatalogMode('all');
     setQuery('');
     setSection(root);
     setSubsection(child);
@@ -89,11 +91,12 @@ function StoreCatalog({ id }: { id?: string }) {
               <button>بحث</button>
             </form>
           </div>
-          {roots.length > 0 && (
+          {<button type="button" className="secondary" onClick={() => { choose(); setCatalogMode('best'); }}>الأكثر مبيعًا</button>}
+          {(
             <section className="store-section-picker" aria-label="أقسام المتجر">
               <h2>{section ? 'تصفّح الأقسام' : 'تسوّق حسب القسم'}</h2>
               <div className={section ? 'store-section-rail' : 'store-section-grid'}>
-                <CategoryTile label="كل المنتجات" current={!section} select={() => choose()} />
+                <CategoryTile label="كل المنتجات" current={!section && !showBestSellers} select={() => choose()} />
                 {roots.map(category => (
                   <CategoryTile key={category.prodCategoryId} label={category.nameAr} image={categoryImage(category)}
                     current={category.prodCategoryId === section} select={() => choose(category.prodCategoryId)} />
@@ -110,7 +113,7 @@ function StoreCatalog({ id }: { id?: string }) {
               )}
             </section>
           )}
-          <Title label={query ? `نتائج البحث عن «${query}»` : categories.find(category => category.prodCategoryId === activeCategory)?.nameAr || 'المنتجات الأكثر مبيعًا'} />
+          <Title label={query ? `نتائج البحث عن «${query}»` : categories.find(category => category.prodCategoryId === activeCategory)?.nameAr || (showBestSellers ? 'المنتجات الأكثر مبيعًا' : 'كل المنتجات')} />
           {profile ? (
             <Result state={products}>
               {items => (

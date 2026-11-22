@@ -4,6 +4,7 @@ test('merchant filters stores products and orders with responsive layout', async
   page,
 }, info) => {
   const errors: string[] = [];
+  const storeUpdates: Record<string, unknown>[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   const stores = [
     {
@@ -34,7 +35,15 @@ test('merchant filters stores products and orders with responsive layout', async
       data = { tokens: { access_token: 'fixture', refresh_token: 'fixture' } };
     else if (path === '/auth/profile')
       data = { user_id: 10, role: 'store_owner', full_name: 'أحمد محمد' };
+    else if (path === '/delivery-companies/me/queue') data = null;
+    else if (path === '/orders/updates') return route.fulfill({ status: 503 });
     else if (path === '/stores/my-stores') data = stores;
+    else if (path === '/stores/1' && route.request().method() === 'PATCH') {
+      const update = route.request().postDataJSON();
+      storeUpdates.push(update);
+      Object.assign(stores[0], update);
+      data = stores[0];
+    }
     else if (path === '/store-categories')
       data = ['مطاعم', 'سوبر ماركت', 'مول', 'مخبز', 'محل جوالات'].map(
         (nameAr, i) => ({ categoryId: i + 1, nameAr }),
@@ -98,6 +107,17 @@ test('merchant filters stores products and orders with responsive layout', async
   await page.getByLabel('البحث في متاجر الصفحة').fill('غير موجود');
   await expect(page.getByText('لا توجد متاجر تطابق بحثك')).toBeVisible();
   await page.getByLabel('البحث في متاجر الصفحة').fill('');
+  const firstStore = page.locator('.owner-store-card').first();
+  await firstStore.getByText('تعديل بيانات المتجر', { exact: true }).click();
+  await firstStore.getByLabel('خط العرض للمتجر', { exact: true }).fill('31.5017');
+  await firstStore.getByRole('button', { name: 'حفظ المتجر', exact: true }).click();
+  await expect(firstStore.getByText('أدخل خط العرض وخط الطول معاً لتحديد موقع المتجر.')).toBeVisible();
+  expect(storeUpdates).toHaveLength(0);
+  await firstStore.getByLabel('خط الطول للمتجر', { exact: true }).fill('34.4668');
+  await firstStore.getByLabel('نطاق التوصيل بالكيلومتر', { exact: true }).fill('10');
+  await firstStore.getByRole('button', { name: 'حفظ المتجر', exact: true }).click();
+  await expect.poll(() => storeUpdates.length).toBe(1);
+  expect(storeUpdates[0]).toMatchObject({ latitude: 31.5017, longitude: 34.4668, deliveryRangeKm: 10 });
   await page.getByText('إضافة متجر', { exact: true }).click();
   await expect(
     page.locator('.owner-create').getByLabel('التصنيف').locator('option'),

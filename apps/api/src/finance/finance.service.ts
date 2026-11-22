@@ -4,13 +4,15 @@ import { ConfigService } from '@nestjs/config';
 import { CustomerOrder, PaymentMethod, Prisma, UserRole } from '@prisma/client';
 import { createHmac, randomUUID } from 'crypto';
 import { PrismaService } from 'prisma/prisma.service';
+import { DriverAvailabilityDto } from './finance.dto';
+import { OrderUpdates } from '../orders/order-updates';
 
 type Actor = { user_id: number; role: UserRole };
 type Tx = Prisma.TransactionClient;
 
 @Injectable()
 export class FinanceService {
-  constructor(private readonly db: PrismaService, private readonly config: ConfigService) {}
+  constructor(private readonly db: PrismaService, private readonly config: ConfigService, private readonly updates: OrderUpdates) {}
 
   assertEnabled(method: PaymentMethod) {
     if (method === 'BANK_TRANSFER' && !['BANK_TRANSFER_INSTRUCTIONS', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN'].every(key => this.config.get(key))) {
@@ -30,22 +32,51 @@ export class FinanceService {
 
   async setDriverApproval(actor: Actor, driverId: number, approved: boolean) {
     this.admin(actor);
-    const driver = await this.db.user.findFirst({ where: { user_id: driverId, role: 'driver', is_active: true, is_verified: true } });
-    if (!driver) throw new NotFoundException('Driver not found');
-    return this.db.driverProfile.upsert({ where: { userId: driverId }, create: { userId: driverId, approved }, update: { approved, ...(!approved ? { available: false } : {}) } });
+    return this.db.$transaction(async tx => {
+      await this.lockDriver(tx, driverId);
+      const driver = await tx.user.findFirst({ where: { user_id: driverId, role: 'driver', is_active: true, is_verified: true } });
+      if (!driver) throw new NotFoundException('Driver not found');
+      return tx.driverProfile.upsert({
+        where: { userId: driverId }, create: { userId: driverId, approved },
+        update: { approved, ...(!approved ? { available: false, latitude: null, longitude: null, locationUpdatedAt: null } : {}) },
+        select: { userId: true, approved: true, available: true },
+      });
+    });
   }
 
-  async setAvailability(actor: Actor, available: boolean) {
+  async driverAvailability(actor: Actor) {
     if (actor.role !== 'driver') throw new ForbiddenException();
-    const updated = await this.db.driverProfile.updateMany({ where: { userId: actor.user_id, approved: true }, data: { available } });
-    if (!updated.count) throw new ForbiddenException('Driver approval required');
-    return { available };
+    return await this.db.driverProfile.findUnique({ where: { userId: actor.user_id }, select: { approved: true, available: true, dispatchAreaId: true } })
+      ?? { approved: false, available: false, dispatchAreaId: null };
+  }
+
+  async setAvailability(actor: Actor, { available, dispatchAreaId }: DriverAvailabilityDto) {
+    if (actor.role !== 'driver') throw new ForbiddenException();
+    if (available === undefined && dispatchAreaId === undefined) throw new BadRequestException('Availability or dispatch area is required');
+    return this.db.$transaction(async tx => {
+      await this.lockDriver(tx, actor.user_id);
+      const updated = await tx.driverProfile.updateMany({
+        where: { userId: actor.user_id, approved: true, user: { role: 'driver', is_active: true, is_verified: true } },
+        data: { available, dispatchAreaId },
+      });
+      if (!updated.count) throw new ForbiddenException('Driver approval required');
+      return tx.driverProfile.findUniqueOrThrow({ where: { userId: actor.user_id }, select: { available: true, dispatchAreaId: true } });
+    });
+  }
+
+  private async lockDriver(tx: Tx, id: number) {
+    await tx.$queryRaw`SELECT user_id FROM users WHERE user_id = ${id} FOR UPDATE`;
   }
 
   async assertEligibleDriver(tx: Tx, id: number) {
-    const driver = await tx.driverProfile.findFirst({ where: { userId: id, approved: true, available: true, user: { role: 'driver', is_active: true, is_verified: true } } });
+    await this.lockDriver(tx, id);
+    const [driver] = await tx.$queryRaw<{ deliveryCompanyId: number | null }[]>`
+      SELECT p.deliveryCompanyId FROM driver_profiles p JOIN users u ON u.user_id = p.userId
+      WHERE p.userId = ${id} AND p.approved = TRUE AND p.available = TRUE
+        AND u.role = 'driver' AND u.is_active = TRUE AND u.is_verified = TRUE FOR UPDATE`;
     if (!driver) throw new ConflictException('Driver must be approved and available');
     if (await tx.customerOrder.findUnique({ where: { activeDriverId: id }, select: { id: true } })) throw new ConflictException('Driver already has an active delivery');
+    return driver;
   }
 
   async createPayment(tx: Tx, order: CustomerOrder, amount: Prisma.Decimal) {
@@ -122,22 +153,31 @@ export class FinanceService {
 
   async confirmIncoming(id: number, method: 'BANK_TRANSFER' | 'ELECTRONIC', amount: number, currency: string, reference: string, actorId: number) {
     try {
-      return await this.db.$transaction(async tx => {
+      const result = await this.db.$transaction(async tx => {
         await tx.$queryRaw`SELECT id FROM customer_orders WHERE id = ${id} FOR UPDATE`;
         const payment = await tx.payment.findUnique({ where: { orderId: id } });
         if (!payment || payment.method !== method) throw new NotFoundException('Payment not found');
         if (method === 'BANK_TRANSFER' && !payment.whatsappReceivedAt) throw new ConflictException('WhatsApp notification has not been received');
         if (!payment.amount.eq(amount) || payment.currency !== currency) throw new BadRequestException('Bank amount or currency does not match');
         const ref = `${method}:${reference}`;
-        if (payment.bankReference === ref) return { status: payment.status };
+        if (payment.bankReference === ref) return { status: payment.status, change: null };
         if (!['DUE', 'VOID'].includes(payment.status)) throw new ConflictException('Payment already processed');
         const status = payment.status === 'VOID' ? 'REFUND_REQUIRED' : 'PAID';
         await tx.payment.update({ where: { orderId: id }, data: { status, bankReference: ref, collectedAt: new Date(), collectedBy: actorId || null } });
+        const opened = status === 'PAID'
+          ? await tx.customerOrder.updateMany({
+            where: { id, status: 'ACCEPTED', dispatchOpenedAt: null },
+            data: { dispatchOpenedAt: new Date() },
+          })
+          : null;
         await this.entry(tx, id, 'COLLECTION', method === 'BANK_TRANSFER' ? 'platform:bank' : 'provider:clearing', 'order:clearing', payment.amount, actorId);
-        const order = await tx.customerOrder.findUniqueOrThrow({ where: { id }, select: { customerId: true, store: { select: { ownerId: true } } } });
-        await recordNotifications(tx, [order.customerId, order.store.ownerId], `payment:${id}:confirmed`, `payment.${status.toLowerCase()}`, id);
-        return { status };
+        const order = await tx.customerOrder.findUniqueOrThrow({ where: { id }, select: { customerId: true, store: { select: { ownerId: true } }, deliveryCompany: { select: { managerId: true } } } });
+        const users = [order.customerId, order.store.ownerId, status === 'PAID' ? order.deliveryCompany?.managerId : null];
+        await recordNotifications(tx, users, `payment:${id}:confirmed`, `payment.${status.toLowerCase()}`, id);
+        return { status, change: { users, independent: Boolean(opened?.count && !order.deliveryCompany) } };
       });
+      if (result.change) this.updates.publish(result.change.users, result.change.independent);
+      return { status: result.status };
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw new ConflictException('Transfer reference already used');
       throw error;
@@ -166,6 +206,32 @@ export class FinanceService {
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw new ConflictException('Settlement reference already used');
+      throw error;
+    }
+  }
+
+  async recordRefund(actor: Actor, id: number, amount: number, currency: string, reference: string) {
+    this.admin(actor);
+    try {
+      return await this.db.$transaction(async tx => {
+        await tx.$queryRaw`SELECT id FROM customer_orders WHERE id = ${id} FOR UPDATE`;
+        const payment = await tx.payment.findUnique({ where: { orderId: id }, include: { order: true } });
+        if (!payment || payment.order.status !== 'CANCELLED') throw new ConflictException('Cancelled payment required');
+        if (!payment.amount.eq(amount) || payment.currency !== currency) throw new BadRequestException('Refund amount or currency does not match');
+        const collection = await tx.paymentEntry.findUnique({ where: { orderId_kind: { orderId: id, kind: 'COLLECTION' } } });
+        if (!collection) throw new ConflictException('Collection has not been recorded');
+        const previous = await tx.paymentEntry.findUnique({ where: { orderId_kind: { orderId: id, kind: 'REFUND' } } });
+        if (previous?.reference === reference && payment.status === 'REFUNDED') return { status: payment.status };
+        if (previous || payment.status !== 'REFUND_REQUIRED') throw new ConflictException('Payment is not awaiting a refund');
+        await this.entry(tx, id, 'REFUND', collection.credit, collection.debit, payment.amount, actor.user_id, reference);
+        await tx.payment.update({ where: { orderId: id }, data: { status: 'REFUNDED' } });
+        await recordNotifications(tx, [payment.order.customerId], `payment:${id}:refunded`, 'payment.refunded', id);
+        return { status: 'REFUNDED' as const };
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException('Refund reference already used');
+      }
       throw error;
     }
   }

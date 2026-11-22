@@ -14,6 +14,7 @@ const Identity = createContext<{
   establish: (s: Session) => Promise<Profile>;
   logout: () => Promise<void>;
   updateProfile: (data: FormData) => Promise<void>;
+  refreshProfile: () => Promise<void>;
 } | null>(null);
 export function useIdentity() {
   const identity = useContext(Identity);
@@ -99,8 +100,12 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
       current?.user_id === updated.user_id ? updated : current,
     );
   }
+  async function refreshProfile() {
+    const updated = await api<Profile>('/auth/profile');
+    setProfile(current => getSession() && current?.user_id === updated.user_id ? updated : current);
+  }
   return (
-    <Identity.Provider value={{ profile, establish, logout, updateProfile }}>
+    <Identity.Provider value={{ profile, establish, logout, updateProfile, refreshProfile }}>
       {restoring ? (
         <div className="container padded">
           <Busy />

@@ -36,8 +36,6 @@ export default function Auth({ mode }: { mode: Mode }) {
         '/auth/register',
         json('POST', {
           phone,
-          full_name: String(form.get('full_name')).trim(),
-          password: form.get('password'),
         }),
         false,
       );
@@ -49,7 +47,7 @@ export default function Auth({ mode }: { mode: Mode }) {
       json(
         'POST',
         mode === 'verify'
-          ? { phone, code: form.get('code') }
+          ? { phone, code: form.get('code'), full_name: String(form.get('full_name')).trim(), password: form.get('password'), role: form.get('role') }
           : { phone, password: form.get('password') },
       ),
       false,
@@ -66,7 +64,7 @@ export default function Auth({ mode }: { mode: Mode }) {
     const profile = await establish(tokens);
     const next = profile.role === 'customer'
       ? '/'
-      : destination === '/' ? '/operations' : destination;
+      : mode === 'verify' || destination === '/' ? '/operations' : destination;
     navigate(next, { replace: true });
   }
   if (mode === 'google' || mode === 'error')
@@ -118,7 +116,7 @@ export default function Auth({ mode }: { mode: Mode }) {
                 : 'تسجيل الدخول'
           }
         >
-          {mode === 'register' && (
+          {mode === 'verify' && (
             <Field
               name="full_name"
               label="الاسم الكامل"
@@ -126,6 +124,15 @@ export default function Auth({ mode }: { mode: Mode }) {
               maxLength={100}
             />
           )}
+          {mode === 'verify' && <label>
+            نوع الحساب
+            <select name="role" defaultValue="customer">
+              <option value="customer">عميل</option>
+              <option value="store_owner">صاحب متجر</option>
+              <option value="driver">سائق توصيل</option>
+            </select>
+            <small>السائقون والمتاجر يحتاجون إلى اعتماد الإدارة قبل بدء العمل.</small>
+          </label>}
           <Field
             name="phone"
             label="رقم الهاتف"
@@ -135,7 +142,7 @@ export default function Auth({ mode }: { mode: Mode }) {
             defaultValue={knownPhone}
             autoComplete="tel-national"
           />
-          {mode === 'verify' ? (
+          {mode === 'verify' && (
             <Field
               name="code"
               label="رمز التحقق"
@@ -144,13 +151,14 @@ export default function Auth({ mode }: { mode: Mode }) {
               pattern="[0-9]{6}"
               maxLength={6}
             />
-          ) : (
+          )}
+          {mode !== 'register' && (
             <Field
               name="password"
               label="كلمة المرور"
               type="password"
               autoComplete={
-                mode === 'register' ? 'new-password' : 'current-password'
+                mode === 'verify' ? 'new-password' : 'current-password'
               }
             />
           )}

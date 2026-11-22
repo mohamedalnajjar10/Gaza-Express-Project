@@ -97,7 +97,7 @@ for (const [role, label] of Object.entries({
     if (role === 'customer') {
       await expect(account.getByText('g_example')).toHaveCount(0);
       await expect(
-        account.getByRole('link', { name: /عناوين التوصيل/ }),
+        account.getByRole('link', { name: /عنواني المحفوظ/ }),
       ).toHaveAttribute('href', '/addresses');
     } else {
       await expect(

@@ -1,3 +1,4 @@
+import { observeRequest } from './common/request-observability';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -19,6 +20,8 @@ async function bootstrap() {
   if (configService.get('TRUST_PROXY') === '1') {
     app.getHttpAdapter().getInstance().set('trust proxy', 1);
   }
+
+  app.use(observeRequest(configService.get('TRUST_PROXY') === '1'));
 
   // Security Headers
   app.use(helmet({

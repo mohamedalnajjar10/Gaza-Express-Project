@@ -1,5 +1,6 @@
 import { NotificationsModule } from './notifications/notifications.module';
 import { OrdersModule } from './orders/orders.module';
+import { OrderUpdatesModule } from './orders/order-updates';
 import { validateEnvironment } from './config/environment';
 import { RedisModule, RedisStorage } from './infrastructure/redis.module';
 import { Module } from '@nestjs/common';
@@ -57,6 +58,7 @@ import { ReviewsModule } from './reviews/reviews.module';
     FavoritesModule,
     ReviewsModule,
     OrdersModule,
+    OrderUpdatesModule,
     NotificationsModule,
   ],
   controllers: [AppController],

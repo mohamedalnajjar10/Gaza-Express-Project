@@ -1,7 +1,8 @@
 import {
     IsString,
+    IsBoolean,
     IsEmail,
-    IsOptional,
+    ValidateIf,
     IsEnum,
     MinLength,
     MaxLength
@@ -9,38 +10,45 @@ import {
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { UserRole, LanguagePref } from '@prisma/client';
 import { AUTH_CONSTANTS } from '../../auth/constants/auth.constants';
+import { PasswordBytes } from '../../auth/dto/password-bytes';
 
 export class UpdateUserDto {
+    @ApiPropertyOptional({ description: 'Administrator attestation of independently verified account ownership' })
+    @ValidateIf((_object, value) => value !== undefined)
+    @IsBoolean()
+    is_verified?: boolean;
+
     @ApiPropertyOptional({ example: 'Ahmed Mohamed' })
-    @IsOptional()
+    @ValidateIf((_object, value) => value !== undefined)
     @IsString()
     @MaxLength(AUTH_CONSTANTS.MAX_FULL_NAME_LENGTH)
     full_name?: string;
 
     @ApiPropertyOptional({ example: 'Ahmed Mohammed' })
-    @IsOptional()
+    @ValidateIf((_object, value) => value !== undefined)
     @IsString()
     @MaxLength(AUTH_CONSTANTS.MAX_FULL_NAME_LENGTH)
     full_name_ar?: string;
 
     @ApiPropertyOptional({ example: 'ahmed@example.com' })
-    @IsOptional()
+    @ValidateIf((_object, value) => value !== undefined)
     @IsEmail()
     email?: string;
 
     @ApiPropertyOptional({ example: 'newPassword123' })
-    @IsOptional()
+    @ValidateIf((_object, value) => value !== undefined)
     @IsString()
     @MinLength(AUTH_CONSTANTS.MIN_PASSWORD_LENGTH)
+    @PasswordBytes()
     password?: string;
 
     @ApiPropertyOptional({ enum: UserRole })
-    @IsOptional()
+    @ValidateIf((_object, value) => value !== undefined)
     @IsEnum(UserRole)
     role?: UserRole;
 
     @ApiPropertyOptional({ enum: LanguagePref })
-    @IsOptional()
+    @ValidateIf((_object, value) => value !== undefined)
     @IsEnum(LanguagePref)
     language_pref?: LanguagePref;
 }

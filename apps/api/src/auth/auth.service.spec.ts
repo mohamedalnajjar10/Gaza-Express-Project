@@ -61,6 +61,7 @@ const mockUserService = {
 };
 
 const mockOtpService = {
+  sendSignup: jest.fn(),
   sendOtp: jest.fn(),
   verifyOtp: jest.fn(),
   resendOtp: jest.fn(),
@@ -77,6 +78,8 @@ const mockConfigService = {
 
 const mockPrismaService = {
   $transaction: jest.fn(),
+  $queryRaw: jest.fn(),
+  user: { findUnique: jest.fn(), update: jest.fn() },
   refreshToken: {
     create: jest.fn(),
     findUnique: jest.fn(),
@@ -109,6 +112,7 @@ describe('AuthService', () => {
     jest.clearAllMocks();
     mockPrismaService.$transaction.mockImplementation(fn => fn(mockPrismaService));
     mockPrismaService.refreshToken.updateMany.mockResolvedValue({ count: 1 });
+    mockPrismaService.user.findUnique.mockResolvedValue(mockUser);
 
     mockConfigService.get.mockImplementation((key: string, def?: any) => {
       const configs: Record<string, any> = {
@@ -127,91 +131,14 @@ describe('AuthService', () => {
 
   // register
   describe('register()', () => {
-    const dto = {
-      phone: '0592149436',
-      password: 'Password123!',
-      full_name: 'Test User',
-      full_name_ar: 'مستخدم تجريبي',
-      email: 'test@example.com',
-    };
-
-    it('[SUCCESS] should register new user and send OTP', async () => {
-      mockUserService.findByPhone.mockResolvedValue(null);
-      mockUserService.createUserForAuth.mockResolvedValue(mockUser);
-      mockOtpService.sendOtp.mockResolvedValue(1);
-
-      const result = await authService.register(dto);
-
-      expect(result).toMatchObject({
-        otp_id: expect.any(Number),
-        user_id: mockUser.user_id,
-      });
-      expect(result.message).toBeDefined();
-      expect(mockUserService.createUserForAuth).toHaveBeenCalledWith(
-        dto.phone,
-        dto.password,
-        dto.full_name,
-        dto.full_name_ar,
-        dto.email,
-        undefined,
-      );
-      expect(mockOtpService.sendOtp).toHaveBeenCalledWith(
-        dto.phone,
-        OtpType.PHONE_VERIFICATION,
-        mockUser.user_id,
-      );
-    });
-
-    it('[SUCCESS] should register without optional email', async () => {
-      const dtoWithoutEmail = { ...dto, email: undefined };
-      mockUserService.findByPhone.mockResolvedValue(null);
-      mockUserService.createUserForAuth.mockResolvedValue({
-        ...mockUser,
-        email: null,
-      });
-      mockOtpService.sendOtp.mockResolvedValue(1);
-
-      const result = await authService.register(dtoWithoutEmail);
-
-      expect(result.user_id).toBeDefined();
-      expect(mockUserService.findByEmail).not.toHaveBeenCalled();
-    });
-
-    it('[BLOCKED] should throw when phone exists and user is verified', async () => {
-      mockUserService.findByPhone.mockResolvedValue(mockUser);
-
-      await expect(authService.register(dto)).rejects.toThrow();
+    it('requests verification without persisting registration credentials', async () => {
+      const response = await authService.register({ phone: mockUser.phone });
+      expect(mockOtpService.sendSignup).toHaveBeenCalledWith(mockUser.phone, true);
+      expect(response).toEqual({ message: 'If verification is available, a code will be sent' });
       expect(mockUserService.createUserForAuth).not.toHaveBeenCalled();
-    });
-
-    it('[RESEND] should resend OTP if phone exists but unverified', async () => {
-      mockUserService.findByPhone.mockResolvedValue(mockUnverifiedUser);
-      mockOtpService.resendOtp.mockResolvedValue(2);
-
-      const result = await authService.register(dto);
-
-      expect(result).toMatchObject({
-        user_id: mockUnverifiedUser.user_id,
-        otp_id: 2,
-      });
-      expect(mockOtpService.resendOtp).toHaveBeenCalledWith(
-        dto.phone,
-        OtpType.PHONE_VERIFICATION,
-        mockUnverifiedUser.user_id,
-      );
-      expect(mockUserService.createUserForAuth).not.toHaveBeenCalled();
-    });
-
-    it('[ERROR] should propagate error if OTP send fails', async () => {
-      mockUserService.findByPhone.mockResolvedValue(null);
-      mockUserService.createUserForAuth.mockResolvedValue(mockUser);
-      mockOtpService.sendOtp.mockRejectedValue(new Error('SMS failed'));
-
-      await expect(authService.register(dto)).rejects.toThrow();
     });
   });
 
-  // login
   describe('login()', () => {
     const dto = { phone: '0592149436', password: 'Password123!' };
 
@@ -275,95 +202,29 @@ describe('AuthService', () => {
 
   // verifyOtp
   describe('verifyOtp()', () => {
-    const dto = { phone: '0592149436', code: '123456' };
-
-    const mockOtpResult = {
-      otp_id: 1,
-      phone: '0592149436',
-      code: 'hashed',
-      type: OtpType.PHONE_VERIFICATION,
-      is_used: false,
-      expires_at: new Date(Date.now() + 300000),
-      created_at: new Date(),
-      user_id: 1,
-      user: mockUnverifiedUser,
-    };
-
-    it('[SUCCESS] should verify OTP and return tokens', async () => {
-      mockOtpService.verifyOtp.mockResolvedValue(mockOtpResult);
-      mockUserService.markAsVerified.mockResolvedValue(mockUser);
-
-      const result = await authService.verifyOtp(dto);
-
-      expect(result.success).toBe(true);
-      expect(result.tokens).toBeDefined();
-      expect(mockUserService.markAsVerified).toHaveBeenCalledWith(
-        mockUnverifiedUser.user_id,
-      );
-    });
-
-    it('[SUCCESS] should not markAsVerified for already verified user', async () => {
-      const otpWithVerifiedUser = { ...mockOtpResult, user: mockUser };
-      mockOtpService.verifyOtp.mockResolvedValue(otpWithVerifiedUser);
-
+    const dto = { phone: mockUser.phone, code: '123456', password: 'Verified!Pass42', full_name: 'Verified user' };
+    it('only updates credentials via the successful challenge transaction', async () => {
+      mockOtpService.verifyOtp.mockImplementation((_phone, _code, _purpose, run) => run(mockPrismaService, mockUser.user_id));
+      mockPrismaService.user.update.mockResolvedValue(mockUser);
       await authService.verifyOtp(dto);
-
-      expect(mockUserService.markAsVerified).not.toHaveBeenCalled();
+      expect(mockPrismaService.user.update).toHaveBeenCalledWith({
+        where: { user_id: mockUser.user_id },
+        data: expect.objectContaining({ is_verified: true, full_name: dto.full_name, password_hash: expect.stringMatching(/^\$2/) }),
+      });
+      expect(mockPrismaService.refreshToken.create).toHaveBeenCalledTimes(1);
     });
-
-    it('[FALLBACK] should findByPhone if otp.user is null', async () => {
-      const otpWithNullUser = { ...mockOtpResult, user: null };
-      mockOtpService.verifyOtp.mockResolvedValue(otpWithNullUser);
-      mockUserService.findByPhone.mockResolvedValue(mockUser);
-
-      await authService.verifyOtp(dto);
-
-      expect(mockUserService.findByPhone).toHaveBeenCalledWith(dto.phone);
-    });
-
-    it('[ERROR] should throw if user not found after OTP verify', async () => {
-      const otpWithNullUser = { ...mockOtpResult, user: null };
-      mockOtpService.verifyOtp.mockResolvedValue(otpWithNullUser);
-      mockUserService.findByPhone.mockResolvedValue(null);
-
-      await expect(authService.verifyOtp(dto)).rejects.toThrow(
-        BadRequestException,
-      );
-    });
-
-    it('[ERROR] should propagate invalid OTP error', async () => {
-      mockOtpService.verifyOtp.mockRejectedValue(
-        new BadRequestException('Invalid OTP'),
-      );
-
-      await expect(authService.verifyOtp(dto)).rejects.toThrow(
-        BadRequestException,
-      );
+    it('leaves credentials untouched when verification fails', async () => {
+      mockOtpService.verifyOtp.mockRejectedValue(new BadRequestException());
+      await expect(authService.verifyOtp(dto)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrismaService.user.update).not.toHaveBeenCalled();
     });
   });
 
-  // resendOtp
-  describe('resendOtp()', () => {
-    it('[SUCCESS] should resend OTP', async () => {
-      mockUserService.findByPhone.mockResolvedValue(mockUser);
-      mockOtpService.resendOtp.mockResolvedValue(3);
-
-      const result = await authService.resendOtp('0592149436');
-
-      expect(result.otp_id).toBe(3);
-      expect(result.message).toBeDefined();
-    });
-
-    it('[ERROR] should throw if user not found', async () => {
-      mockUserService.findByPhone.mockResolvedValue(null);
-
-      await expect(authService.resendOtp('0000000000')).rejects.toThrow(
-        BadRequestException,
-      );
-    });
+  it('acknowledges requests for another verification code', async () => {
+    await expect(authService.resendOtp(mockUser.phone)).resolves.toHaveProperty('message');
+    expect(mockOtpService.sendSignup).toHaveBeenCalledWith(mockUser.phone, false);
   });
 
-  // refreshToken
   describe('refreshToken()', () => {
     it('[SUCCESS] should return new tokens', async () => {
       mockPrismaService.refreshToken.findUnique.mockResolvedValue(
@@ -411,6 +272,7 @@ describe('AuthService', () => {
   describe('logout()', () => {
     it('[SUCCESS] should revoke refresh token', async () => {
       mockPrismaService.refreshToken.updateMany.mockResolvedValue({ count: 1 });
+    mockPrismaService.user.findUnique.mockResolvedValue(mockUser);
 
       const result = await authService.logout(1, 'valid.token');
 

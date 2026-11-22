@@ -61,11 +61,13 @@ $ npm run start:prod
 $ npm run test
 
 # e2e tests
-$ npm run test:e2e
+$ E2E_ALLOW_DATABASE=1 npm run test:e2e
 
 # test coverage
 $ npm run test:cov
 ```
+
+Use a dedicated non-root MySQL account and a local database ending in `_test` for API E2E. When a container is the test host, set `E2E_DATABASE_HOST` to its isolated DNS name. Environment variables take precedence over `.env.test`.
 
 ## Deployment
 

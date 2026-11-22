@@ -8,7 +8,7 @@ import { Prisma, User, UserRole } from '@prisma/client';
 import { PrismaService } from 'prisma/prisma.service';
 import { AUTH_CONSTANTS } from '../auth/constants/auth.constants';
 
-export type UserPayload = Omit<User, 'password_hash'>;
+export type UserPayload = Omit<User, 'password_hash' | 'sessionVersion'>;
 
 @Injectable()
 export class UserService {
@@ -95,7 +95,7 @@ export class UserService {
   }
 
   async findAll(page = new PageDto()): Promise<UserPayload[]> {
-    const users = await this.prisma.user.findMany({ ...pageWindow(page), orderBy: { user_id: 'asc' } });
+    const users = await this.prisma.user.findMany({ ...pageWindow(page), orderBy: { user_id: 'asc' }, include: { driverProfile: { select: { approved: true, available: true } } } });
     return users.map((u) => this.mapToPublic(u));
   }
 
@@ -147,14 +147,22 @@ export class UserService {
     if (updateUserDto.language_pref !== undefined) {
       updateData.language_pref = updateUserDto.language_pref;
     }
+    if (updateUserDto.is_verified !== undefined) updateData.is_verified = updateUserDto.is_verified;
     if (Object.keys(updateData).length === 0) {
       throw new BadRequestException('No data to update');
     }
 
     try {
+      const revokeSessions = updateData.password_hash !== undefined || updateData.role !== undefined || updateData.is_verified !== undefined;
       const updatedUser = await this.prisma.user.update({
         where: { user_id: id },
-        data: updateData,
+        data: {
+          ...updateData,
+          ...(revokeSessions && {
+            sessionVersion: { increment: 1 },
+            refresh_tokens: { updateMany: { where: { revoked_at: null }, data: { revoked_at: new Date() } } },
+          }),
+        },
       });
 
       return this.mapToPublic(updatedUser);
@@ -174,13 +182,17 @@ export class UserService {
     await this.findOnePublic(id);
     await this.prisma.user.update({
       where: { user_id: id },
-      data: { is_active: false },
+      data: {
+        is_active: false,
+        sessionVersion: { increment: 1 },
+        refresh_tokens: { updateMany: { where: { revoked_at: null }, data: { revoked_at: new Date() } } },
+      },
     });
     return { message: 'Account disabled successfully' };
   }
 
   private mapToPublic(user: User): UserPayload {
-    const { password_hash, ...result } = user;
+    const { password_hash, sessionVersion, ...result } = user;
     return result;
   }
 

@@ -1,0 +1,80 @@
+.address-page .sr-only, .address-editor .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.address-page { width: min(100%, 660px); margin-inline: auto; }
+.address-editor { background: #fff; border: 1px solid #e7e9e5; border-radius: 28px; padding: clamp(18px, 3vw, 30px); box-shadow: 0 12px 50px #18352a06; }
+.address-editor-heading { display: flex; align-items: center; gap: 12px; margin-block-end: 22px; }
+.address-editor-heading h1 { flex: 1; margin: 0; font-size: 1.45rem; color: #232825; }
+.address-back { border: 1px solid #e2e5e1; border-radius: 50%; width: 42px; min-height: 42px; padding: 0; background: #fff; color: #252a27; }
+.address-back:hover { background: #f0f4f0; color: #252a27; }
+.address-delete { background: white; border: 1px solid #e2e5e1; color: #8d302b; border-radius: 99px; font-size: .86rem; }
+.address-delete:hover { color: #8d302b; background: #fff3f1; }
+.address-map-section { border-radius: 18px; overflow: hidden; background: #eef2ee; margin-block-end: 18px; }
+.address-map-viewport { position: relative; }
+.address-map-canvas { height: 240px; width: 100%; }
+.address-map-pin { position: absolute; top: 120px; left: 50%; transform: translate(-50%, -100%); color: #ec681b; pointer-events: none; filter: drop-shadow(0 4px 3px #562f1725); }
+.address-map-pin svg { stroke: #fff; }
+.address-map-unavailable { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px 24px 60px; gap: 9px; text-align: center; background: #edf1eb; color: #476054; }
+.address-map-unavailable p { max-width: 32ch; margin: 0; font-size: .8rem; }
+.address-locate { position: absolute; bottom: 34px; inset-inline-end: 12px; background: #fff; color: #1a4e39; border: 1px solid #e1e7de; border-radius: 99px; min-height: 39px; font-size: .79rem; box-shadow: 0 2px 8px #173b2412; }
+.address-locate:hover { color: #184d36; background: #f0f8ee; }
+.address-map-caption { min-height: 40px; padding: 9px 12px; background: #f4f7f2; font-size: .75rem; color: #516456; }
+.address-map-caption p { margin: 6px 0 0; }
+.address-map-search { position: absolute; top: 12px; inset-inline: 12px; display: flex; padding: 2px 10px 2px 2px; border-radius: 13px; box-shadow: 0 2px 12px #183e2620; background: #fff; align-items: center; gap: 8px; }
+.address-map-search input { background: transparent; border: 0; padding: 6px 0; font-size: .83rem; min-width: 0; flex: 1; width: 0; }
+.address-map-search button { padding: 0; min-height: 34px; width: 34px; border-radius: 10px; }
+.address-editor .form { gap: 16px; }
+.address-area { display: flex; align-items: center; gap: 13px; border: 1px solid #dedfdd; border-radius: 20px; padding: 14px 18px; color: #222823; }
+.address-area label { flex: 1; min-width: 0; margin: 0; gap: 2px; font-size: .85rem; }
+.address-area input { border: 0; padding: 0; min-height: 28px; border-radius: 0; font-size: .92rem; background: transparent; width: 100%; color: #56645b; }
+.address-area button { background: transparent; color: #bf540f; padding: 5px 0; min-height: 36px; font-size: .83rem; }
+.address-kind { display: flex; gap: 10px; padding: 4px 0; border: 0; margin: 7px 0 0; }
+.address-kind label { flex: 1; position: relative; display: flex; flex-direction: row; justify-content: center; align-items: center; gap: 8px; cursor: pointer; padding: 11px 8px; border: 1px solid #dfe3dd; border-radius: 99px; color: #343b35; font-size: .9rem; }
+.address-kind input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.address-kind label:has(:focus-visible) { outline: 3px solid #a35508; outline-offset: 3px; }
+.address-kind label.is-selected { background: #272e28; color: #fff; border-color: #272e28; }
+.address-field { position: relative; border: 1px solid #dedfdd; border-radius: 20px; padding: 13px 18px; display: grid; gap: 3px; }
+.address-field span { color: #7a827b; font-size: .76rem; font-weight: 450; }
+.address-field input { border: 0; border-radius: 0; background: transparent; padding: 0; padding-inline-end: 26px; min-height: 27px; font-size: .91rem; color: #232b24; width: 100%; }
+.address-field input::placeholder, .address-area input::placeholder { color: #a0a69f; }
+.address-check { position: absolute; inset-inline-end: 17px; top: 50%; background: #2b332c; color: #fff; padding: 3px; border-radius: 50%; box-sizing: content-box; transform: translateY(-15%); }
+.address-phone { position: relative; display: flex; gap: 15px; align-items: center; direction: ltr; border: 1px solid #dedfdd; border-radius: 20px; padding: 13px 18px; }
+.address-phone > label:not(.address-phone-prefix) { flex: 1; min-width: 0; font-size: .76rem; color: #7a827b; gap: 3px; text-align: start; }
+.address-phone input { background: transparent; width: 100%; min-height: 27px; border: 0; padding: 0; padding-right: 20px; font-size: .92rem; color: #232b24; }
+.address-phone-prefix { border-right: 1px solid #e3e5e0; padding-right: 12px; margin: 0; max-width: 125px; }
+.address-phone-prefix select { border: 0; padding: 5px 0; background: transparent; font-size: .85rem; width: 100%; }
+.address-phone .address-check { right: 17px; left: auto; }
+.address-form-hint { font-size: .78rem; margin: 0 9px 4px; line-height: 1.9; }
+.address-editor .form > button { width: 100%; border-radius: 99px; background: #ec681b; font-size: 1rem; min-height: 54px; box-shadow: 0 5px 15px #dc611c15; }
+.address-editor .form > button:hover { background: #d85a10; }
+.address-welcome { position: relative; padding: 6px 4px 20px; }
+.address-welcome > span { font-weight: 800; color: var(--deep); }
+.address-welcome p { font-size: .85rem; margin: 5px 0; padding-inline-end: 85px; }
+.address-welcome .form { position: absolute; inset-inline-end: 0; top: 10px; }
+.address-welcome .form > button { color: #526255; background: transparent; text-decoration: underline; font-weight: 600; min-height: 36px; padding: 4px; }
+.address-saved { padding: clamp(24px, 5vw, 48px); border: 1px solid var(--line); background: #fff; border-radius: 26px; display: flex; align-items: center; flex-direction: column; gap: 14px; text-align: center; }
+.address-saved-icon { width: 70px; height: 70px; display: grid; place-items: center; border-radius: 23px; background: #edf3e9; color: var(--green); }
+.address-eyebrow { color: var(--muted); font-size: .83rem; }
+.address-saved h1 { font-size: 1.7rem; margin: 0; }
+.address-saved p { max-width: 40ch; margin: 0; }
+.address-saved > button { align-self: center; margin-top: 8px; padding-inline: 25px; }
+.address-saved-notice { display: flex; gap: 7px; align-items: center; color: var(--green); font-size: .85rem; }
+.address-previous { margin-block-start: 15px; width: 100%; text-align: start; }
+.address-previous summary { cursor: pointer; }
+.address-previous button { margin-top: 10px; width: 100%; text-align: start; justify-content: start; }
+
+.address-dialog::backdrop { background: #17312666; }
+.address-dialog { border: 1px solid #e4e8e1; width: calc(100% - 44px); color: var(--deep); border-radius: 24px; background: white; padding: 26px; max-width: 430px; box-shadow: 0 12px 60px #0003; }
+.address-dialog h2 { font-size: 1.15rem; }
+.address-dialog > div:last-child { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+.address-inline-error { color: #a03a27; font-size: .85rem; }
+.checkout-address-card { display: flex; align-items: center; gap: 14px; border: 1px solid var(--line); border-radius: 18px; background: #f8fbf5; padding: 16px; }
+.checkout-address-card > div { flex: 1; min-width: 0; }
+.checkout-address-card p { font-size: .82rem; margin: 3px 0; }
+.checkout-address-card button { padding: 5px 10px; min-height: 36px; font-size: .8rem; }
+@media (max-width: 540px) {
+  .address-editor { padding: 17px; border-radius: 22px; }
+  .address-map-canvas { height: 210px; }
+  .address-map-pin { top: 105px; }
+  .address-kind { gap: 7px; }
+  .address-field, .address-phone, .address-area { border-radius: 18px; padding: 12px 14px; }
+  .address-map-search { inset-inline: 8px; top: 8px; }
+}

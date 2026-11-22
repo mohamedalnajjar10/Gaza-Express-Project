@@ -31,10 +31,12 @@ export function OrderActions({
   const submit =
     (action: string, numeric?: string) => async (data: FormData) => {
       const fields = Object.fromEntries(data.entries());
+      const { deliveryCompanyId, ...actionFields } = fields;
       await api(
         `/orders/${id}/status`,
         json('PATCH', {
-          ...fields,
+          ...actionFields,
+          ...(deliveryCompanyId !== undefined && { deliveryCompanyId: deliveryCompanyId ? Number(deliveryCompanyId) : null }),
           ...(numeric && { [numeric]: Number(fields[numeric]) }),
           action,
           version,
@@ -43,18 +45,29 @@ export function OrderActions({
       reload();
     };
   const reason = <Field label="السبب" name="reason" maxLength={500} />;
+  const company = order.deliveryCompanies && (order.deliveryCompanies.length > 0 || order.deliveryCompanyId != null) && (
+    <label>
+      طريقة التوصيل
+      <select name="deliveryCompanyId" defaultValue={order.deliveryCompanyAvailable === false ? '' : order.deliveryCompanyId ?? ''} key={`${order.version}:${order.deliveryCompanyAvailable}`}>
+        <option value="">سائق مستقل</option>
+        {order.deliveryCompanies.map(partner => <option key={partner.id} value={partner.id}>{partner.name}</option>)}
+      </select>
+    </label>
+  );
   return (
     <div className="stack order-actions">
-      {role === 'customer' && status === 'QUOTED' && (
-        <ActionForm
+      {role === 'customer' && status === 'QUOTED' && (order.deliveryCompanyAvailable === false
+        ? <p role="status">شركة التوصيل المحددة غير متاحة حاليًا. بانتظار عرض محدّث من المتجر.</p>
+        : <ActionForm
           label="الموافقة على السعر"
           submit={submit('approve_quote')}
         />
       )}
       {role === 'store_owner' && (
         <>
+          {quote && order.deliveryCompanyAvailable === false && <p role="status">شركة التوصيل المحددة غير متاحة. اختر طريقة توصيل متاحة وأرسل العرض مجددًا.</p>}
           {status === 'PENDING' && !order.requiresQuote && (
-            <ActionForm label="قبول الطلب" submit={submit('accept')} />
+            <ActionForm label="قبول الطلب" submit={submit('accept')}>{company}</ActionForm>
           )}
           {quote && (
             <ActionForm
@@ -68,6 +81,7 @@ export function OrderActions({
                 min={0}
                 step="0.01"
               />
+              {company}
             </ActionForm>
           )}
           {quote && (
@@ -78,14 +92,17 @@ export function OrderActions({
               </ActionForm>
             </details>
           )}
-          {status === 'ACCEPTED' && (
-            <ActionForm label="الطلب جاهز للاستلام" submit={submit('ready')} />
-          )}
+          {status === 'ACCEPTED' && (order.paymentMethod === 'CASH' || order.payment?.status === 'PAID'
+            ? <ActionForm label="الطلب جاهز للاستلام" submit={submit('ready')} />
+            : <p>بانتظار تأكيد الدفع قبل تسليم الطلب للسائق.</p>)}
         </>
       )}
       {role === 'admin' && (
         <>
-          {status === 'READY' && !activeOffer && (
+          {(status === 'ACCEPTED' || status === 'READY') && order.deliveryCompanyId != null && order.driverId == null && (
+            <ActionForm label="تحويل الطلب إلى سائق مستقل" submit={submit('reroute_delivery')}>{reason}</ActionForm>
+          )}
+          {status === 'READY' && !activeOffer && !order.deliveryCompanyId && (
             <ActionForm
               label="عرض الطلب على السائق"
               submit={submit('assign', 'driverId')}
@@ -100,7 +117,10 @@ export function OrderActions({
           )}
           {status === 'IN_TRANSIT' && (
             <details className="surface padded">
-              <summary>إعادة إصدار رمز التسليم</summary>
+              <summary>إجراءات تعذّر التسليم</summary>
+              <ActionForm label="تأكيد إرجاع الطلب إلى المتجر" submit={submit('confirm_return')}>
+                {reason}
+              </ActionForm>
               <ActionForm
                 label="إصدار الرمز"
                 submit={submit('reset_delivery_code')}
@@ -113,6 +133,9 @@ export function OrderActions({
       )}
       {role === 'driver' && (
         <>
+          {order.openOffer?.canClaim && <ActionForm label="قبول مهمة التوصيل" submit={submit('claim_delivery')} />}
+          {order.openOffer && !order.openOffer.canClaim && <p>الأولوية الآن للسائق الأقرب. يُفتح القبول لبقية السائقين بعد انتهاء الأولوية.</p>}
+          {status === 'ACCEPTED' && order.driverId === user_id && <p>الطلب مسند إليك ويجري تحضيره. يمكنك تأكيد الاستلام عندما يحدده المتجر كجاهز.</p>}
           {status === 'READY' &&
             activeOffer &&
             order.offeredDriverId === user_id && (
@@ -221,7 +244,7 @@ function Payment({ order }: { order: Order }) {
               ))}
             </ul>
             {payment.method === 'BANK_TRANSFER' &&
-              payment.status === 'DUE' &&
+              ['DUE', 'VOID'].includes(payment.status) &&
               (payment.whatsappReceivedAt ? (
                 <ActionForm
                   label="تأكيد المطابقة مع كشف البنك"
@@ -249,6 +272,17 @@ function Payment({ order }: { order: Order }) {
               ) : (
                 <p>بانتظار وصول إشعار واتساب.</p>
               ))}
+            {payment.status === 'REFUND_REQUIRED' && (
+              <ActionForm label="تسجيل رد المبلغ بعد تنفيذه" submit={async data => {
+                await api(`/orders/${order.id}/payment/refund`, json('POST', {
+                  amount: Number(data.get('amount')), currency: payment.currency, reference: data.get('reference'),
+                }));
+                state.reload();
+              }}>
+                <Field label="المبلغ المسترد" name="amount" type="number" min={0} step="0.01" />
+                <Field label="مرجع الاسترداد" name="reference" maxLength={70} />
+              </ActionForm>
+            )}
             {order.status === 'DELIVERED' && (
               <ActionForm
                 label="تسجيل التسوية"

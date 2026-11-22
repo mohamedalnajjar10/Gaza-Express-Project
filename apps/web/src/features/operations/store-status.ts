@@ -6,6 +6,9 @@ export type ManagedStore = Store & {
   categoryId: number;
   fullAddressAr?: string | null;
   fullAddress?: string | null;
+  latitude?: string | number | null;
+  longitude?: string | number | null;
+  deliveryRangeKm?: string | number;
 };
 export const storeStatuses: Record<string, string> = {
   PENDING_APPROVAL: 'بانتظار المراجعة',

@@ -1,5 +1,7 @@
 import type { Session } from '../auth/types';
 
+type ResponseType = 'json' | 'blob' | 'event-stream';
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -54,16 +56,14 @@ async function request<T>(
   path: string,
   init: RequestInit,
   access?: string,
-  responseType: 'json' | 'blob' = 'json',
+  responseType: ResponseType = 'json',
 ): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData))
     headers.set('Content-Type', 'application/json');
   if (access) headers.set('Authorization', `Bearer ${access}`);
-  const timeout = AbortSignal.timeout(15000);
-  const signal = init.signal
-    ? AbortSignal.any([init.signal, timeout])
-    : timeout;
+  const timeout = responseType === 'event-stream' ? null : AbortSignal.timeout(15000);
+  const signal = timeout && init.signal ? AbortSignal.any([timeout, init.signal]) : timeout ?? init.signal;
   const response = await fetch(`/api/v1${path}`, {
     ...init,
     headers,
@@ -73,6 +73,10 @@ async function request<T>(
   if (response.status === 204) return undefined as T;
   if (response.ok && responseType === 'blob')
     return (await response.blob()) as T;
+  if (response.ok && responseType === 'event-stream') {
+    if (response.body && response.headers.get('Content-Type')?.startsWith('text/event-stream')) return response.body as T;
+    throw new ApiError(503, 'Live updates unavailable');
+  }
   const body = await response.json().catch(() => null);
   const retryAfter = Number(response.headers.get('Retry-After'));
   if (!response.ok || body?.success !== true)
@@ -91,7 +95,7 @@ export async function api<T>(
   path: string,
   init: RequestInit = {},
   authenticated = true,
-  responseType: 'json' | 'blob' = 'json',
+  responseType: ResponseType = 'json',
 ): Promise<T> {
   const previous = authenticated ? session : null;
   try {

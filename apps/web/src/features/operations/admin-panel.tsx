@@ -159,11 +159,12 @@ function Users() {
                         }),
                       );
                       setNotice(`تم تحديث اعتماد السائق #${user.user_id}`);
+                      state.reload();
                     }}
                   >
                     <label>
                       الاعتماد
-                      <select name="approval">
+                      <select name="approval" defaultValue={String(user.driverProfile?.approved ?? false)}>
                         <option value="true">معتمد</option>
                         <option value="false">غير معتمد</option>
                       </select>

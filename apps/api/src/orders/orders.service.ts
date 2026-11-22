@@ -1,20 +1,23 @@
+import { transitions } from './order-transitions';
 import { PageDto, pageWindow } from 'src/common/dto/page.dto';
 import { recordNotifications } from '../notifications/record-notifications';
 import {
   BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException,
 } from '@nestjs/common';
-import { OrderStatus, Prisma, UserRole } from '@prisma/client';
+import { Prisma, UserRole } from '@prisma/client';
 import { createHash, randomUUID, timingSafeEqual } from 'crypto';
 import { FinanceService } from '../finance/finance.service';
 import { PrismaService } from 'prisma/prisma.service';
 import { AddressDto, CartItemDto, CheckoutDto, OrderAction, OrderActionDto, ReplaceCartDto } from './orders.dto';
+import { DispatchService } from './dispatch.service';
+import { OrderUpdates } from './order-updates';
 
 type Actor = { user_id: number; role: UserRole };
 const emptyCart = { version: 0, storeId: null, items: [] };
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly db: PrismaService, private readonly finance: FinanceService) {}
+  constructor(private readonly db: PrismaService, private readonly finance: FinanceService, private readonly dispatch: DispatchService, private readonly updates: OrderUpdates) {}
 
   private customer(actor: Actor) {
     if (actor.role !== 'customer') throw new ForbiddenException('Customer account required');
@@ -22,23 +25,78 @@ export class OrdersService {
   }
 
   addresses(actor: Actor, page = new PageDto()) {
-    return this.db.deliveryAddress.findMany({ where: { customerId: this.customer(actor) }, orderBy: { id: 'desc' }, ...pageWindow(page) });
+    return this.db.deliveryAddress.findMany({ where: { customerId: actor.user_id }, orderBy: { id: 'desc' }, ...pageWindow(page) });
   }
 
-  createAddress(actor: Actor, dto: AddressDto) {
-    return this.db.deliveryAddress.create({ data: { ...dto, customerId: this.customer(actor) } });
+  async skipAddressOnboarding(actor: Actor) {
+    await this.db.user.updateMany({
+      where: { user_id: actor.user_id, addressPromptedAt: null },
+      data: { addressPromptedAt: new Date() },
+    });
+    return { acknowledged: true };
+  }
+
+  async saveDefaultAddress(actor: Actor, dto: AddressDto) {
+    return this.db.$transaction(async tx => {
+      await this.lockCustomer(tx, actor.user_id);
+      const user = await tx.user.findUniqueOrThrow({ where: { user_id: actor.user_id }, select: { defaultAddressId: true } });
+      const current = user.defaultAddressId
+        ? await tx.deliveryAddress.findFirst({ where: { id: user.defaultAddressId, customerId: actor.user_id } })
+        : await tx.deliveryAddress.findFirst({ where: { customerId: actor.user_id }, orderBy: { id: 'desc' } });
+      const data = this.addressData(dto);
+      const saved = current
+        ? await tx.deliveryAddress.update({ where: { id: current.id }, data })
+        : await tx.deliveryAddress.create({ data: { ...data, customerId: actor.user_id } });
+      await tx.user.update({ where: { user_id: actor.user_id }, data: { defaultAddressId: saved.id, addressPromptedAt: new Date() } });
+      return saved;
+    });
+  }
+
+  async createAddress(actor: Actor, dto: AddressDto) {
+    return this.db.$transaction(async tx => {
+      await this.lockCustomer(tx, actor.user_id);
+      const saved = await tx.deliveryAddress.create({ data: { ...this.addressData(dto), customerId: actor.user_id } });
+      const user = await tx.user.findUniqueOrThrow({ where: { user_id: actor.user_id }, select: { defaultAddressId: true } });
+      await tx.user.update({
+        where: { user_id: actor.user_id },
+        data: { addressPromptedAt: new Date(), defaultAddressId: user.defaultAddressId ?? saved.id },
+      });
+      return saved;
+    });
   }
 
   async updateAddress(actor: Actor, id: number, dto: AddressDto) {
-    const where = { id, customerId: this.customer(actor) };
-    const result = await this.db.deliveryAddress.updateMany({ where, data: dto });
-    if (!result.count) throw new NotFoundException('Address not found');
-    return this.db.deliveryAddress.findFirstOrThrow({ where });
+    return this.db.$transaction(async tx => {
+      await this.lockCustomer(tx, actor.user_id);
+      const result = await tx.deliveryAddress.updateMany({ where: { id, customerId: actor.user_id }, data: this.addressData(dto) });
+      if (!result.count) throw new NotFoundException('Address not found');
+      await tx.user.update({ where: { user_id: actor.user_id }, data: { defaultAddressId: id, addressPromptedAt: new Date() } });
+      return tx.deliveryAddress.findUniqueOrThrow({ where: { id } });
+    });
   }
 
   async deleteAddress(actor: Actor, id: number) {
-    const result = await this.db.deliveryAddress.deleteMany({ where: { id, customerId: this.customer(actor) } });
-    if (!result.count) throw new NotFoundException('Address not found');
+    await this.db.$transaction(async tx => {
+      await this.lockCustomer(tx, actor.user_id);
+      const result = await tx.deliveryAddress.deleteMany({ where: { id, customerId: actor.user_id } });
+      if (!result.count) throw new NotFoundException('Address not found');
+      const user = await tx.user.findUniqueOrThrow({ where: { user_id: actor.user_id }, select: { defaultAddressId: true } });
+      if (!user.defaultAddressId) {
+        const next = await tx.deliveryAddress.findFirst({ where: { customerId: actor.user_id }, orderBy: { id: 'desc' }, select: { id: true } });
+        await tx.user.update({ where: { user_id: actor.user_id }, data: { defaultAddressId: next?.id ?? null } });
+      }
+    });
+  }
+
+  private addressData(dto: AddressDto) {
+    return {
+      ...dto, label: dto.label.trim(), address: dto.address.trim(),
+      ...(dto.area !== undefined && { area: dto.area.trim() }),
+      ...(dto.building !== undefined && { building: dto.building.trim() }),
+      ...(dto.floor !== undefined && { floor: dto.floor.trim() }),
+      ...(dto.street !== undefined && { street: dto.street.trim() }),
+      ...(dto.directions !== undefined && { directions: dto.directions.trim() }),
+    };
   }
 
   async cart(actor: Actor) {
@@ -63,7 +121,7 @@ export class OrdersService {
       const product = byId.get(item.productId);
       const options = product?.productOptions.filter(option => option.isAvailable && item.optionIds.includes(option.optionId));
       if (!product?.isAvailable || options?.length !== item.optionIds.length) {
-        return { ...cart, store, items, products };
+        return { ...cart, store, items, products, estimatedMin: null, estimatedMax: null, needsReview: true };
       }
       const extra = options.reduce((sum, option) => sum.plus(option.extraCost), new Prisma.Decimal(0));
       min = min.plus(product.estimatedPriceMin.plus(extra).times(item.quantity));
@@ -86,7 +144,7 @@ export class OrdersService {
     });
   }
 
-  private async rewardBalance(db: Prisma.TransactionClient, customerId: number) {
+  private async rewardBalance(db: { customerOrder: Pick<Prisma.TransactionClient['customerOrder'], 'groupBy'> }, customerId: number) {
     const rows = await db.customerOrder.groupBy({
       by: ['status'],
       where: { customerId, status: { notIn: ['CANCELLED', 'REJECTED'] } },
@@ -108,12 +166,12 @@ export class OrdersService {
     const paymentMethod = dto.paymentMethod ?? 'CASH';
     const note = dto.note?.trim();
     const requestHash = createHash('sha256').update(`${dto.cartVersion}:${dto.addressId}${paymentMethod === 'CASH' ? '' : `:${paymentMethod}`}${dto.redeemReward ? ':reward' : ''}${note ? `:note:${note}` : ''}`).digest('hex');
-    return this.db.$transaction(async tx => {
+    const { order, ownerId } = await this.db.$transaction(async tx => {
       await this.lockCustomer(tx, customerId);
       const existing = await tx.customerOrder.findUnique({ where: { customerId_idempotencyKey: { customerId, idempotencyKey } } });
       if (existing) {
         if (existing.requestHash !== requestHash) throw new ConflictException('Idempotency key already used for different checkout');
-        return existing;
+        return { order: existing, ownerId: null };
       }
       this.finance.assertEnabled(paymentMethod);
       const cart = await tx.shoppingCart.findUnique({ where: { customerId } });
@@ -124,9 +182,10 @@ export class OrdersService {
       if (!address) throw new NotFoundException('Address not found');
       const { store, snapshots, min, max, requiresQuote } = await this.catalog(tx, items);
       if (store.status !== 'ACTIVE' || !store.isOpenNow) throw new ConflictException('Store is not accepting orders');
-      if (store.latitude === null || store.longitude === null) throw new ConflictException('Store delivery location is missing');
-      if (distanceKm(+store.latitude, +store.longitude, +address.latitude, +address.longitude) > +store.deliveryRangeKm) {
-        throw new BadRequestException('Address is outside delivery range');
+      if (store.latitude === null || store.longitude === null) throw new ConflictException('موقع المتجر غير محدد. تواصل مع المتجر لتحديث موقعه قبل الطلب.');
+      const deliveryDistance = distanceKm(+store.latitude, +store.longitude, +address.latitude, +address.longitude);
+      if (deliveryDistance > +store.deliveryRangeKm) {
+        throw new BadRequestException(`العنوان خارج نطاق توصيل المتجر. المسافة المحسوبة ${deliveryDistance.toFixed(1)} كم، والنطاق المتاح ${Number(store.deliveryRangeKm)} كم. تأكد من موقع عنوانك، واطلب من المتجر مراجعة موقعه إذا كانت المسافة غير صحيحة.`);
       }
       if (max.lt(store.minOrderAmount) || (!requiresQuote && min.lt(store.minOrderAmount))) {
         throw new BadRequestException('Order is below the store minimum');
@@ -136,7 +195,7 @@ export class OrdersService {
       }
       const order = await tx.customerOrder.create({ data: {
         customerId, paymentMethod, storeId: store.storeId, idempotencyKey, requestHash, storeName: store.storeName,
-        addressSnapshot: { id: address.id, label: address.label, address: address.address, latitude: address.latitude.toString(), longitude: address.longitude.toString() },
+        addressSnapshot: { id: address.id, label: address.label, address: address.address, latitude: address.latitude.toString(), longitude: address.longitude.toString(), area: address.area, residenceType: address.residenceType, building: address.building, floor: address.floor, street: address.street, phone: address.phone, directions: address.directions },
         itemSnapshots: snapshots, currency: 'ILS', estimatedMin: min, estimatedMax: max,
         minimumAmount: store.minOrderAmount, requiresQuote,
         ...(dto.redeemReward && { rewardPointsUsed: 100, rewardDiscountRate: 5 }),
@@ -144,8 +203,10 @@ export class OrdersService {
       } });
       await recordNotifications(tx, [store.ownerId], `order:${order.id}:1`, 'order.checkout', order.id);
       await tx.shoppingCart.update({ where: { customerId }, data: { storeId: null, items: [], version: { increment: 1 } } });
-      return order;
+      return { order, ownerId: store.ownerId };
     });
+    if (ownerId !== null) this.updates.publish([ownerId, customerId]);
+    return order;
   }
 
   async list(actor: Actor, before?: number) {
@@ -154,18 +215,54 @@ export class OrdersService {
       include: { store: { select: { logoUrl: true, coverImageUrl: true, storeNameAr: true } } }, orderBy: { id: 'desc' }, take: 51,
     });
     const page = rows.slice(0, 50);
-    return { orders: page.map(order => this.view(order)), nextBefore: rows.length > 50 ? page[49].id : null };
+    return { orders: page.map(order => this.view(order, actor)), nextBefore: rows.length > 50 ? page[49].id : null };
   }
 
   async get(actor: Actor, id: number) {
     const order = await this.db.customerOrder.findFirst({
-      where: { ...this.scope(actor), id }, include: { events: { orderBy: { version: 'asc' } } },
+      where: { ...this.scope(actor), id },
+      include: {
+        events: { orderBy: { version: 'asc' } },
+        store: { select: { fullAddressAr: true, fullAddress: true, latitude: true, longitude: true, phone: true } },
+        payment: { select: { status: true } },
+        deliveryCompany: { select: { name: true } },
+        customer: actor.role === 'store_owner' ? { select: { full_name: true, full_name_ar: true, phone: true } } : false,
+      },
     });
-    if (!order) throw new NotFoundException('Order not found');
-    return this.view(order);
+    if (order) {
+      const deliveryCompanies = actor.role === 'store_owner' && ['PENDING', 'QUOTED'].includes(order.status)
+        ? await this.db.deliveryCompany.findMany({
+          where: { contracts: { some: { storeId: order.storeId, confirmed: true } }, manager: { role: 'store_owner', is_active: true, is_verified: true } },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        })
+        : undefined;
+      const deliveryCompanyAvailable = order.status === 'QUOTED' && order.deliveryCompanyId !== null
+        ? (deliveryCompanies
+          ? deliveryCompanies.some(company => company.id === order.deliveryCompanyId)
+          : await this.hasActiveDeliveryContract(this.db, order.storeId, order.deliveryCompanyId))
+        : undefined;
+      return { ...this.view(order, actor), ...(deliveryCompanies && { deliveryCompanies }), deliveryCompanyAvailable };
+    }
+    if (actor.role === 'driver') {
+      const [offer] = await this.dispatch.independentOffers(actor, id);
+      if (offer) return offer;
+    }
+    if (actor.role === 'store_owner') {
+      const companyOrder = await this.db.customerOrder.findFirst({
+        where: { id, dispatchOpenedAt: { not: null }, deliveryCompany: { managerId: actor.user_id } },
+        select: { id: true, storeId: true, storeName: true, version: true, status: true, createdAt: true },
+      });
+      if (companyOrder) return { ...companyOrder, offerOnly: true, companyView: true };
+    }
+    throw new NotFoundException('Order not found');
   }
 
-  view<T extends { idempotencyKey: string; requestHash: string; deliveryNonce: string | null }>(order: T) {
+  view<T extends Pick<import('@prisma/client').CustomerOrder, 'id' | 'idempotencyKey' | 'requestHash' | 'deliveryNonce' | 'driverId' | 'storeId' | 'storeName' | 'status' | 'version' | 'offerExpiresAt' | 'offeredDriverId' | 'createdAt'>>(order: T, actor?: Actor) {
+    if (actor?.role === 'driver' && order.driverId !== actor.user_id) {
+      const { id, storeId, storeName, status, version, offerExpiresAt, offeredDriverId, createdAt } = order;
+      return { id, storeId, storeName, status, version, offerExpiresAt, offeredDriverId, createdAt, offerOnly: true };
+    }
     const { idempotencyKey, requestHash, deliveryNonce, ...publicOrder } = order;
     return publicOrder;
   }
@@ -180,24 +277,55 @@ export class OrdersService {
   }
 
   async act(actor: Actor, id: number, dto: OrderActionDto) {
+    const { role } = actor;
+    const rule = transitions[dto.action];
+    const claim = dto.action === OrderAction.CLAIM_DELIVERY;
+    const companyAssign = dto.action === OrderAction.COMPANY_ASSIGN;
+    const reroute = dto.action === OrderAction.REROUTE_DELIVERY;
+    if ((claim || companyAssign) && !rule.roles.includes(role)) throw new ForbiddenException('Action not allowed for this role');
     const result = await this.db.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM customer_orders WHERE id = ${id} FOR UPDATE`;
-      const where = { id, ...this.scope(actor) };
+      const where: Prisma.CustomerOrderWhereInput = claim
+        ? { id, deliveryCompanyId: null, dispatchOpenedAt: { not: null }, driverId: null, status: { in: rule.from } }
+        : companyAssign
+          ? { id, deliveryCompany: { managerId: actor.user_id }, dispatchOpenedAt: { not: null } }
+          : { id, ...this.scope(actor) };
       const order = await tx.customerOrder.findFirst({ where });
+      if (!order && claim) throw new ConflictException('Delivery offer is unavailable');
       if (!order) throw new NotFoundException('Order not found');
-      const { role } = actor;
-      const rule = transitions[dto.action];
       if (!rule.roles.includes(role)) throw new ForbiddenException('Action not allowed for this role');
       if (dto.action === OrderAction.DELIVER && order.driverId === actor.user_id && order.status === 'DELIVERED' && order.version === dto.version + 1) {
-        return this.view(order);
+        return { value: this.view(order, actor), change: null };
       }
       if (order.version !== dto.version || !rule.from.includes(order.status)) throw new ConflictException('Order changed or action is invalid in this state');
-      const data: Prisma.CustomerOrderUncheckedUpdateManyInput = { status: rule.to, version: { increment: 1 } };
+      let toStatus = rule.to;
+      if ((claim || companyAssign) && order.status === 'ACCEPTED') toStatus = 'ACCEPTED';
+      if (dto.action === OrderAction.READY && order.driverId !== null) toStatus = 'ASSIGNED';
+      if (reroute) toStatus = order.status;
+      const data: Prisma.CustomerOrderUncheckedUpdateManyInput = { status: toStatus, version: { increment: 1 } };
       const details: Prisma.InputJsonObject = {
         ...(dto.reason ? { reason: dto.reason } : {}),
         ...(dto.total !== undefined ? { total: new Prisma.Decimal(dto.total).toFixed(2) } : {}),
         ...(dto.driverId !== undefined ? { driverId: dto.driverId } : {}),
+        ...(reroute ? { previousDeliveryCompanyId: order.deliveryCompanyId } : {}),
       };
+      if ([OrderAction.ACCEPT, OrderAction.QUOTE, OrderAction.APPROVE_QUOTE].includes(dto.action)) {
+        const choice = dto.action === OrderAction.APPROVE_QUOTE ? undefined : dto.deliveryCompanyId;
+        const companyId = choice === undefined ? order.deliveryCompanyId : choice;
+        if (companyId !== null && !await this.hasActiveDeliveryContract(tx, order.storeId, companyId, true)) {
+          throw new ConflictException('The selected delivery company is unavailable. A new quote or delivery selection is required.');
+        }
+        if (choice !== undefined) data.deliveryCompanyId = choice;
+      }
+      if (reroute) {
+        if (order.deliveryCompanyId === null || order.driverId !== null) {
+          throw new ConflictException('Only unassigned company deliveries can be rerouted');
+        }
+        data.deliveryCompanyId = null;
+        data.dispatchOpenedAt = order.dispatchOpenedAt ? new Date() : null;
+        data.offeredDriverId = null;
+        data.offerExpiresAt = null;
+      }
       if (dto.action === OrderAction.ACCEPT) {
         if (order.requiresQuote) throw new ConflictException('A confirmed quote is required');
         data.finalTotal = order.estimatedMin;
@@ -210,7 +338,8 @@ export class OrdersService {
       if (dto.action === OrderAction.APPROVE_QUOTE) data.finalTotal = order.proposedTotal;
       if (dto.action === OrderAction.ASSIGN) {
         if (order.offerExpiresAt && order.offerExpiresAt > new Date()) throw new ConflictException('An offer is already active');
-        await this.finance.assertEligibleDriver(tx, dto.driverId!);
+        const driver = await this.finance.assertEligibleDriver(tx, dto.driverId!);
+        if (order.deliveryCompanyId !== null || driver.deliveryCompanyId !== null) throw new ConflictException('Manual offers require an independent driver and order');
         data.offeredDriverId = dto.driverId;
         data.offerExpiresAt = new Date(Date.now() + 5 * 60_000);
       }
@@ -219,14 +348,30 @@ export class OrdersService {
           throw new ConflictException('Assignment offer is unavailable');
         }
         if (dto.action === OrderAction.ACCEPT_ASSIGNMENT) {
-          await this.finance.assertEligibleDriver(tx, actor.user_id);
+          const driver = await this.finance.assertEligibleDriver(tx, actor.user_id);
+          if (driver.deliveryCompanyId !== order.deliveryCompanyId) throw new ConflictException('Driver is no longer eligible for this order');
           data.driverId = actor.user_id;
           data.activeDriverId = actor.user_id;
         }
         data.offeredDriverId = null;
         data.offerExpiresAt = null;
       }
-      if (dto.action === OrderAction.READY) await this.finance.assertReady(tx, order);
+      if (claim || companyAssign) {
+        if (order.driverId !== null) throw new ConflictException('A driver is already assigned');
+        const driverId = claim ? actor.user_id : dto.driverId!;
+        const driver = await this.finance.assertEligibleDriver(tx, driverId);
+        if (driver.deliveryCompanyId !== order.deliveryCompanyId) throw new ConflictException('Driver is not eligible for this order');
+        if (claim) {
+          const [offer] = await this.dispatch.independentOffers(actor, id, tx);
+          if (!offer?.openOffer.canClaim) throw new ConflictException('Delivery offer is unavailable or reserved for the nearest driver');
+        }
+        data.driverId = driverId;
+        data.activeDriverId = driverId;
+      }
+      if (dto.action === OrderAction.READY) {
+        await this.finance.assertReady(tx, order);
+        if (!order.dispatchOpenedAt) data.dispatchOpenedAt = new Date();
+      }
       if (dto.action === OrderAction.PICK_UP) {
         if (order.driverId !== actor.user_id) throw new ForbiddenException('Assigned driver required');
         data.deliveryNonce = randomUUID();
@@ -249,23 +394,36 @@ export class OrdersService {
           return null;
         }
         await this.finance.completeDelivery(tx, order, actor.user_id, dto.collectedAmount);
+        await tx.$executeRaw`
+          UPDATE products p
+          JOIN (
+            SELECT item.productId, SUM(item.quantity) AS sold
+            FROM JSON_TABLE(${JSON.stringify(order.itemSnapshots)}, '$[*]' COLUMNS (
+              productId INT PATH '$.productId', quantity INT PATH '$.quantity'
+            )) item WHERE item.quantity > 0 GROUP BY item.productId
+          ) totals ON totals.productId = p.product_id
+          SET p.sold_quantity = p.sold_quantity + totals.sold
+          WHERE p.store_id = ${order.storeId}`;
         data.activeDriverId = null;
         data.deliveryNonce = null;
         data.deliveryCodeExpiresAt = null;
       }
-      if (dto.action === OrderAction.CANCEL) {
+      if (dto.action === OrderAction.CANCEL || dto.action === OrderAction.CONFIRM_RETURN) {
         await this.finance.cancelPayment(tx, id);
         data.activeDriverId = null;
+        data.deliveryNonce = null;
+        data.deliveryCodeExpiresAt = null;
         data.offeredDriverId = null;
         data.offerExpiresAt = null;
       }
-      if (rule.to === 'ACCEPTED') {
+      if ([OrderAction.ACCEPT, OrderAction.APPROVE_QUOTE].includes(dto.action)) {
         const total = new Prisma.Decimal(data.finalTotal as Prisma.Decimal);
         const discount = total.times(order.rewardDiscountRate).div(100).toDecimalPlaces(2);
         data.rewardDiscount = discount;
         const payable = total.minus(discount);
         data.finalTotal = payable;
         await this.finance.createPayment(tx, order, payable);
+        if (order.paymentMethod === 'CASH') data.dispatchOpenedAt = new Date();
       }
       const updated = await tx.customerOrder.updateMany({ where: { ...where, version: dto.version }, data }).catch(error => {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw new ConflictException('Driver already has an active delivery');
@@ -274,21 +432,45 @@ export class OrdersService {
       if (!updated.count) throw new ConflictException('Order changed');
       await tx.orderEvent.create({ data: {
         orderId: id, actorId: actor.user_id, actorRole: role, version: dto.version + 1,
-        action: dto.action, fromStatus: order.status, toStatus: rule.to, details,
+        action: dto.action, fromStatus: order.status, toStatus, details,
       } });
-      const store = await tx.store.findUniqueOrThrow({ where: { storeId: order.storeId }, select: { ownerId: true } });
-      const recipients = dto.action === OrderAction.ASSIGN ? [dto.driverId] : [order.customerId, store.ownerId, order.driverId, order.offeredDriverId];
+      const updatedOrder = await tx.customerOrder.findUniqueOrThrow({
+        where: { id }, include: { store: { select: { ownerId: true } }, deliveryCompany: { select: { managerId: true } } },
+      });
+      const recipients = dto.action === OrderAction.ASSIGN
+        ? [dto.driverId]
+        : [order.customerId, updatedOrder.store.ownerId, updatedOrder.driverId ?? order.offeredDriverId,
+          updatedOrder.dispatchOpenedAt ? updatedOrder.deliveryCompany?.managerId : null];
       await recordNotifications(tx, recipients, `order:${id}:${dto.version + 1}`, `order.${dto.action}`, id, actor.user_id);
-      return this.view(await tx.customerOrder.findUniqueOrThrow({ where: { id } }));
-    });
+      const { store: _store, deliveryCompany: _company, ...updatedState } = updatedOrder;
+      const independentOffer = (state: typeof updatedState) => state.deliveryCompanyId === null && state.driverId === null &&
+        !!state.dispatchOpenedAt && (state.status === 'ACCEPTED' || state.status === 'READY');
+      return {
+        value: companyAssign ? { id, status: toStatus, version: updatedOrder.version, driverId: updatedOrder.driverId } : this.view(updatedState, actor),
+        change: { users: [...recipients, order.customerId, updatedOrder.store.ownerId, actor.user_id], independent: independentOffer(order) || independentOffer(updatedState) },
+      };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     if (!result) throw new BadRequestException('Incorrect delivery code');
-    return result;
+    if (result.change) this.updates.publish(result.change.users, result.change.independent);
+    return result.value;
   }
 
   async getDeliveryCode(actor: Actor, id: number) {
     const order = await this.db.customerOrder.findFirst({ where: { id, customerId: this.customer(actor), status: 'IN_TRANSIT' } });
     if (!order?.deliveryNonce || !order.deliveryCodeExpiresAt || order.deliveryCodeExpiresAt <= new Date()) throw new NotFoundException('Delivery code not available');
     return { code: this.finance.deliveryCode(order.id, order.deliveryNonce), expiresAt: order.deliveryCodeExpiresAt };
+  }
+
+  private async hasActiveDeliveryContract(db: Pick<Prisma.TransactionClient, '$queryRaw'>, storeId: number, companyId: number, lock = false) {
+    const [contract] = await db.$queryRaw<{ storeId: number }[]>`
+      SELECT contract.storeId FROM store_delivery_contracts AS contract
+      JOIN delivery_companies AS company ON company.id = contract.deliveryCompanyId
+      JOIN users AS manager ON manager.user_id = company.managerId
+      WHERE contract.storeId = ${storeId} AND company.id = ${companyId} AND contract.confirmed = TRUE
+        AND manager.role = 'store_owner' AND manager.is_active = TRUE AND manager.is_verified = TRUE
+      ${lock ? Prisma.sql`FOR SHARE` : Prisma.empty}
+    `;
+    return Boolean(contract);
   }
 
   private async lockCustomer(tx: Prisma.TransactionClient, customerId: number) {
@@ -334,22 +516,6 @@ export class OrdersService {
     return { store, snapshots, min, max, requiresQuote };
   }
 }
-
-const transitions: Record<OrderAction, { roles: UserRole[]; from: OrderStatus[]; to: OrderStatus }> = {
-  accept: { roles: ['store_owner'], from: ['PENDING'], to: 'ACCEPTED' },
-  quote: { roles: ['store_owner'], from: ['PENDING', 'QUOTED'], to: 'QUOTED' },
-  approve_quote: { roles: ['customer'], from: ['QUOTED'], to: 'ACCEPTED' },
-  reject: { roles: ['store_owner'], from: ['PENDING', 'QUOTED'], to: 'REJECTED' },
-  cancel: { roles: ['customer', 'store_owner', 'admin'], from: ['PENDING', 'QUOTED', 'ACCEPTED', 'READY', 'ASSIGNED'], to: 'CANCELLED' },
-  ready: { roles: ['store_owner'], from: ['ACCEPTED'], to: 'READY' },
-  assign: { roles: ['admin'], from: ['READY'], to: 'READY' },
-  accept_assignment: { roles: ['driver'], from: ['READY'], to: 'ASSIGNED' },
-  decline_assignment: { roles: ['driver'], from: ['READY'], to: 'READY' },
-  pick_up: { roles: ['driver'], from: ['ASSIGNED'], to: 'IN_TRANSIT' },
-  deliver: { roles: ['driver'], from: ['IN_TRANSIT'], to: 'DELIVERED' },
-  report_delivery_issue: { roles: ['driver'], from: ['IN_TRANSIT'], to: 'IN_TRANSIT' },
-  reset_delivery_code: { roles: ['admin'], from: ['IN_TRANSIT'], to: 'IN_TRANSIT' },
-};
 
 function distanceKm(lat1: number, lon1: number, lat2: number, lon2: number) {
   const radians = Math.PI / 180;

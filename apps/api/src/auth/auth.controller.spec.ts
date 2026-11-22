@@ -150,7 +150,7 @@ describe('AuthController', () => {
 
   // verifyOtp
   describe('verifyOtp()', () => {
-    const dto = { phone: '0592149436', code: '123456' };
+    const dto = { phone: '0592149436', code: '123456', full_name: 'Fixture', password: 'Password123!' };
 
     it('[SUCCESS] should verify OTP and return tokens', async () => {
       const expected = {

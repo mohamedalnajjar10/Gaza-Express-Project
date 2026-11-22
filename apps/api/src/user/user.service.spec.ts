@@ -433,7 +433,7 @@ describe('UserService', () => {
       );
       expect(prismaService.user.update).toHaveBeenCalledWith({
         where: { user_id: 1 },
-        data: { password_hash: 'newHashedPassword' },
+        data: expect.objectContaining({ password_hash: 'newHashedPassword', sessionVersion: { increment: 1 } }),
       });
     });
 
@@ -509,7 +509,7 @@ describe('UserService', () => {
       expect(result.role).toBe(UserRole.admin);
       expect(prismaService.user.update).toHaveBeenCalledWith({
         where: { user_id: 1 },
-        data: { role: UserRole.admin },
+        data: expect.objectContaining({ role: UserRole.admin, sessionVersion: { increment: 1 } }),
       });
     });
 
@@ -619,7 +619,7 @@ describe('UserService', () => {
       expect(result).toEqual({ message: 'Account disabled successfully' });
       expect(prismaService.user.update).toHaveBeenCalledWith({
         where: { user_id: 1 },
-        data: { is_active: false },
+        data: expect.objectContaining({ is_active: false, sessionVersion: { increment: 1 } }),
       });
     });
 

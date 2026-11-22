@@ -1,10 +1,5 @@
-import * as crypto from 'crypto';
+import { createHmac } from 'node:crypto';
 
-export function hashOTP(otp: string): string {
-    return crypto.createHash('sha256').update(otp).digest('hex');
-}
-
-export function verifyOTP(plainOtp: string, hashedOtp: string): boolean {
-    const hash = hashOTP(plainOtp);
-    return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(hashedOtp));
+export function hashOTP(otp: string, key: string, challenge: string, phone: string, purpose: string): string {
+    return createHmac('sha256', key).update(JSON.stringify([challenge, phone, purpose, otp])).digest('hex');
 }

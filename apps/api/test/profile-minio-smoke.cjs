@@ -3,13 +3,18 @@
  */
 const assert = require('node:assert/strict');
 const { PrismaClient } = require('@prisma/client');
-const { Client } = require('minio');
+const { S3Client, HeadObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const jwt = require('jsonwebtoken');
 const sharp = require('sharp');
 const db = new PrismaClient();
-const endpoint = new URL(process.env.PRODUCT_MEDIA_ENDPOINT);
-const storage = new Client({ endPoint: endpoint.hostname, port: Number(endpoint.port) || undefined, useSSL: endpoint.protocol === 'https:', region: 'us-east-1', accessKey: process.env.PRODUCT_MEDIA_ACCESS_KEY, secretKey: process.env.PRODUCT_MEDIA_SECRET_KEY });
-const base = 'http://gateway/api/v1';
+const storage = new S3Client({
+  endpoint: process.env.PRODUCT_MEDIA_ENDPOINT, forcePathStyle: true, region: 'us-east-1',
+  credentials: { accessKeyId: process.env.PRODUCT_MEDIA_ACCESS_KEY, secretAccessKey: process.env.PRODUCT_MEDIA_SECRET_KEY },
+});
+const stat = Key => storage.send(new HeadObjectCommand({ Bucket: 'product-media', Key }));
+const remove = Key => storage.send(new DeleteObjectCommand({ Bucket: 'product-media', Key }));
+const origin = process.env.PROFILE_SMOKE_ORIGIN || 'http://api-router:8080';
+const base = origin + '/api/v1';
 const tag = Date.now();
 const users = [];
 const paths = new Set();
@@ -40,17 +45,17 @@ async function main() {
     const current = await check(await fetch(`${base}/auth/profile`, {headers: headers(token)}), 200);
     assert.equal(current.email, saved.email);
     assert.equal(current.profile_photo_url, saved.profile_photo_url);
-    const response = await check(await fetch(`http://gateway${saved.profile_photo_url}`, {headers: headers(token)}), 200);
+    const response = await check(await fetch(`${origin}${saved.profile_photo_url}`, {headers: headers(token)}), 200);
     const bytes = Buffer.from(await response.arrayBuffer());
     assert.equal((await sharp(bytes).metadata()).format, 'webp');
-    const object = await storage.statObject('product-media', `profiles/${saved.profile_photo_url.split('/').pop()}`);
-    assert.equal(object.size, bytes.length);
+    const object = await stat(`profiles/${saved.profile_photo_url.split('/').pop()}`);
+    assert.equal(object.ContentLength, bytes.length);
     console.log(`PASS ${role}: editable profile persisted and image stored in MinIO`);
   }
   const [first, second] = users;
   await check(await fetch(`${base}/account/profile`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({full_name: 'No session'})}), 401);
   await check(await fetch(`${base}/account/profile`, {method: 'PATCH', headers: {...headers(first.token), 'Content-Type': 'application/json'}, body: JSON.stringify({role: 'admin'})}), 400);
-  await check(await fetch(`http://gateway${first.photo}`, {headers: headers(second.token)}), 404);
+  await check(await fetch(`${origin}${first.photo}`, {headers: headers(second.token)}), 404);
   const bad = new FormData(); bad.set('image', new Blob(['not an image'], {type:'image/png'}), 'fake.png');
   await check(await fetch(`${base}/account/profile`, {method: 'PATCH', headers: headers(first.token), body: bad}), 400);
   const large = new FormData(); large.set('image', new Blob([Buffer.alloc(5 * 1024 * 1024 + 1)], {type:'image/png'}), 'large.png');
@@ -61,7 +66,7 @@ async function main() {
   const replacement = new FormData(); replacement.set('image', new Blob([image], {type:'image/png'}), 'new.png');
   const updated = await check(await fetch(`${base}/account/profile`, {method: 'PATCH', headers: headers(first.token), body: replacement}), 200);
   paths.add(updated.profile_photo_url);
-  await assert.rejects(storage.statObject('product-media', `profiles/${first.photo.split('/').pop()}`), e => ['NotFound', 'NoSuchKey'].includes(e.code));
+  await assert.rejects(stat(`profiles/${first.photo.split('/').pop()}`), e => e.$metadata?.httpStatusCode === 404);
   console.log('PASS authorization, privilege rejection, invalid/oversized uploads, email conflict, and old-image removal');
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; }).finally(async () => {
@@ -69,7 +74,7 @@ main().catch(error => { console.error(error.message); process.exitCode = 1; }).f
     const current = await db.user.findUnique({where: {user_id: user.user_id}, select: {profile_photo_url: true}});
     if (current?.profile_photo_url) paths.add(current.profile_photo_url);
   }
-  for (const path of paths) await storage.removeObject('product-media', `profiles/${path.split('/').pop()}`);
+  for (const path of paths) await remove(`profiles/${path.split('/').pop()}`);
   if (users.length) await db.user.deleteMany({where: {user_id: {in: users.map(u => u.user_id)}}});
   await db.$disconnect();
   console.log('Removed disposable QA accounts and images');

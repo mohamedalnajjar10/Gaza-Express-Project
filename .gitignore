@@ -61,3 +61,8 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 .env.*
 !.env.*.example
+
+# Documentation
+/docs/*
+!/docs/BACKEND_ENGINEERING_PROMPT.md
+!/docs/BACKEND_ENGINEERING_SOURCES.md

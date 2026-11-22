@@ -18,12 +18,6 @@ async function main() {
     return;
   }
 
-  const existing = await prisma.productCategory.findFirst({ where: { storeId: store1.storeId } });
-  if (existing) {
-    console.log('Product categories already exist for store', store1.storeId);
-    return;
-  }
-
   const categories = [
     { storeId: store1.storeId, nameAr: 'ألبان', nameEn: 'Dairy', sortOrder: 1 },
     { storeId: store1.storeId, nameAr: 'خضروات', nameEn: 'Vegetables', sortOrder: 2 },
@@ -33,11 +27,27 @@ async function main() {
     { storeId: store1.storeId, nameAr: 'مخبوزات', nameEn: 'Bakery', sortOrder: 6 },
   ];
 
-  for (const cat of categories) {
-    await prisma.productCategory.create({ data: cat });
-  }
+  const count = await prisma.$transaction(async tx => {
+    const existing = await tx.productCategory.findMany({
+      where: { storeId: store1.storeId },
+      select: { prodCategoryId: true, nameAr: true, nameEn: true, sortOrder: true, parentId: true },
+    });
+    if (existing.length === 0) return (await tx.productCategory.createMany({ data: categories })).count;
 
-  console.log(`Seeded ${categories.length} product categories for store ${store1.storeId}`);
+    let repaired = 0;
+    for (const previous of existing.filter(category => category.parentId === null && /^[?\uFFFD\s]+$/.test(category.nameAr))) {
+      const fixture = categories.find(category => category.nameEn === previous.nameEn && category.sortOrder === previous.sortOrder);
+      if (!fixture) continue;
+      const result = await tx.productCategory.updateMany({
+        where: { prodCategoryId: previous.prodCategoryId, nameAr: previous.nameAr },
+        data: { nameAr: fixture.nameAr },
+      });
+      repaired += result.count;
+    }
+    return repaired;
+  });
+
+  console.log(`Wrote ${count} fixture product categories for store ${store1.storeId}`);
 }
 
 main()

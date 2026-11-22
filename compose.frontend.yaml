@@ -4,6 +4,7 @@ services:
     build:
       context: ./apps/web
       args:
+        VITE_GOOGLE_MAPS_API_KEY: ${VITE_GOOGLE_MAPS_API_KEY:-}
         VITE_GOOGLE_ENABLED: ${GOOGLE_AUTH_ENABLED:-false}
         VITE_BANK_TRANSFER_ENABLED: ${WEB_BANK_TRANSFER_ENABLED:-false}
     volumes:

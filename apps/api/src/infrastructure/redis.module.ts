@@ -8,7 +8,7 @@ export class RedisStorage implements OnModuleDestroy {
   private readonly client: Redis;
   constructor(config: ConfigService) {
     this.client = new Redis(config.getOrThrow<string>('REDIS_URL'), {
-      lazyConnect: true, maxRetriesPerRequest: 1, connectTimeout: 1000, commandTimeout: 1000,
+      lazyConnect: true, maxRetriesPerRequest: 0, connectTimeout: 1000, commandTimeout: 1000,
       enableOfflineQueue: false,
     });
     this.client.on('error', () => undefined);

@@ -5,8 +5,9 @@ export type Cart = {
   storeId: number | null;
   version: number;
   items: { productId: number; quantity: number; optionIds: number[] }[];
-  estimatedMin?: string;
-  estimatedMax?: string;
+  estimatedMin: string | null;
+  estimatedMax: string | null;
+  needsReview?: boolean;
   store?: { storeName: string; storeNameAr?: string | null } | null;
   products?: (Pick<Product, 'productId' | 'nameAr' | 'imageUrl' | 'unitAr' | 'estimatedPriceMin' | 'estimatedPriceMax' | 'isPriceFixed' | 'productOptions'> & { isAvailable: boolean })[];
 };

@@ -19,3 +19,5 @@ npm run test:e2e -- --runInBand
 ```
 
 Never put credentials in the tracked templates. For another workstation, create a `wasla_test` schema and account scoped to it, then copy `.env.test.example` to `.env.test` and supply its URL and two independent signing secrets.
+
+Run `npx prisma db seed` from `apps/api` for local catalog fixture data. The seed reads Arabic literals directly from the UTF-8 TypeScript file and writes via Prisma. It can restore a placeholder product category when its English name and sort order identify a known fixture. For store or product text already replaced by question marks, recover the original from a trusted import or backup before applying any correction.

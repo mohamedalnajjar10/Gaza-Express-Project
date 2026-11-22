@@ -8,7 +8,9 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
-import { Client } from 'minio';
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
+import { Readable } from 'node:stream';
 import sharp from 'sharp';
 
 export const IMAGE_UPLOAD_LIMIT = 5 * 1024 * 1024;
@@ -16,7 +18,7 @@ const keyPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\.webp$/;
 const bucket = 'product-media';
 
 export class S3ImageStorage {
-  private readonly client?: Client;
+  private readonly client?: S3Client;
   private readonly path: string;
   private readonly logger = new Logger(S3ImageStorage.name);
 
@@ -29,17 +31,25 @@ export class S3ImageStorage {
     const endpoint = config.get<string>('PRODUCT_MEDIA_ENDPOINT');
     if (endpoint) {
       const url = new URL(endpoint);
-      this.client = new Client({
-        endPoint: url.hostname,
-        port: url.port ? Number(url.port) : undefined,
-        useSSL: url.protocol === 'https:',
+      if (!['https:', 'http:'].includes(url.protocol)) throw new Error('Invalid media storage endpoint');
+      this.client = new S3Client({
+        endpoint,
+        forcePathStyle: true,
         region: 'us-east-1',
-        transportAgent:
-          url.protocol === 'https:'
-            ? new HttpsAgent({ keepAlive: true, timeout: 5_000 })
-            : new HttpAgent({ keepAlive: true, timeout: 5_000 }),
-        accessKey: config.getOrThrow<string>('PRODUCT_MEDIA_ACCESS_KEY'),
-        secretKey: config.getOrThrow<string>('PRODUCT_MEDIA_SECRET_KEY'),
+        maxAttempts: 2,
+        requestChecksumCalculation: 'WHEN_REQUIRED',
+        responseChecksumValidation: 'WHEN_REQUIRED',
+        requestHandler: new NodeHttpHandler({
+          connectionTimeout: 2000,
+          requestTimeout: 5000,
+          throwOnRequestTimeout: true,
+          httpAgent: new HttpAgent({ keepAlive: true, maxSockets: 32 }),
+          httpsAgent: new HttpsAgent({ keepAlive: true, maxSockets: 32 }),
+        }),
+        credentials: {
+          accessKeyId: config.getOrThrow<string>('PRODUCT_MEDIA_ACCESS_KEY'),
+          secretAccessKey: config.getOrThrow<string>('PRODUCT_MEDIA_SECRET_KEY'),
+        },
       });
     }
   }
@@ -76,13 +86,9 @@ export class S3ImageStorage {
     }
     const name = `${randomUUID()}.webp`;
     try {
-      await client.putObject(
-        bucket,
-        `${this.scope}/${name}`,
-        image,
-        image.length,
-        { 'Content-Type': 'image/webp' },
-      );
+      await client.send(new PutObjectCommand({
+        Bucket: bucket, Key: `${this.scope}/${name}`, Body: image, ContentLength: image.length, ContentType: 'image/webp',
+      }));
     } catch {
       throw new ServiceUnavailableException('Image storage unavailable');
     }
@@ -93,9 +99,11 @@ export class S3ImageStorage {
     if (!keyPattern.test(name)) throw new NotFoundException('Image not found');
     const client = this.storage();
     try {
-      return await client.getObject(bucket, `${this.scope}/${name}`);
+      const { Body } = await client.send(new GetObjectCommand({ Bucket: bucket, Key: `${this.scope}/${name}` }));
+      if (!(Body instanceof Readable)) throw new Error('Storage response has no readable body');
+      return Body;
     } catch (error) {
-      if (error?.code === 'NoSuchKey' || error?.code === 'NotFound') {
+      if (error?.name === 'NoSuchKey' || error?.$metadata?.httpStatusCode === 404) {
         throw new NotFoundException('Image not found');
       }
       throw new ServiceUnavailableException('Image storage unavailable');
@@ -107,7 +115,7 @@ export class S3ImageStorage {
     const name = path.slice(this.path.length);
     if (!keyPattern.test(name)) return;
     try {
-      await this.storage().removeObject(bucket, `${this.scope}/${name}`);
+      await this.storage().send(new DeleteObjectCommand({ Bucket: bucket, Key: `${this.scope}/${name}` }));
     } catch {
       this.logger.warn('Could not remove an unused image');
     }

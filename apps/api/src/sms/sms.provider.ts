@@ -11,6 +11,7 @@ export type SendOutcome =
 
 export interface SmsProvider {
   send(phone: string, message: string, expiresAt: Date): Promise<SendOutcome>;
+  deliveryStatus?(id: string): Promise<'delivered' | 'failed' | 'pending'>;
 }
 
 export class FakeSmsProvider implements SmsProvider {
@@ -29,6 +30,17 @@ export class TwilioSmsProvider implements SmsProvider {
     this.auth = Buffer.from(`${this.account}:${config.getOrThrow('TWILIO_AUTH_TOKEN')}`).toString('base64');
     this.sender = config.getOrThrow('TWILIO_MESSAGING_SERVICE_SID');
     if (!/^AC[a-f0-9]{32}$/i.test(this.account) || !/^MG[a-f0-9]{32}$/i.test(this.sender)) throw new Error('Invalid Twilio configuration');
+  }
+
+  async deliveryStatus(id: string) {
+    if (!/^SM[a-f0-9]{32}$/i.test(id)) return 'pending' as const;
+    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.account}/Messages/${id}.json`, {
+      headers: { Authorization: `Basic ${this.auth}` }, redirect: 'error', signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return 'pending' as const;
+    const { status } = await response.json() as { status?: string };
+    if (status === 'delivered') return 'delivered' as const;
+    return ['failed', 'undelivered', 'canceled'].includes(status ?? '') ? 'failed' as const : 'pending' as const;
   }
 
   async send(phone: string, message: string, expiresAt: Date): Promise<SendOutcome> {

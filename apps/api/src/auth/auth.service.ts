@@ -10,14 +10,15 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { UserService } from '../user/user.service';
 import { OtpService } from '../otp/otp.service';
-import { OtpType, User } from '@prisma/client';
+import { OtpType, Prisma, User } from '@prisma/client';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 import { PrismaService } from 'prisma/prisma.service';
-import { AUTH_ERROR_MESSAGES } from './constants/auth.constants';
+import { AUTH_CONSTANTS, AUTH_ERROR_MESSAGES } from './constants/auth.constants';
 import * as crypto from 'crypto';
+import * as bcrypt from 'bcrypt';
 
 export interface Tokens {
     access_token: string;
@@ -37,61 +38,8 @@ export class AuthService {
     ) { }
 
     async register(dto: RegisterDto) {
-        try {
-            const existingUser = await this.userService.findByPhone(dto.phone);
-
-            if (existingUser) {
-                if (!existingUser.is_verified) {
-                    const otpId = await this.otpService.resendOtp(
-                        dto.phone,
-                        OtpType.PHONE_VERIFICATION,
-                        existingUser.user_id,
-                    );
-
-                    return {
-                        message: 'Account exists. Verification code queued',
-                        otp_id: otpId,
-                        user_id: existingUser.user_id,
-                    };
-                }
-
-                throw new BadRequestException(
-                    AUTH_ERROR_MESSAGES.MOBILE_ALREADY_REGISTERED
-                );
-            }
-
-            const user = await this.userService.createUserForAuth(
-                dto.phone,
-                dto.password,
-                dto.full_name,
-                dto.full_name_ar,
-                dto.email,
-                dto.role
-            );
-
-            const otpId = await this.otpService.sendOtp(
-                dto.phone,
-                OtpType.PHONE_VERIFICATION,
-                user.user_id,
-            );
-
-            return {
-                message: 'Account created successfully. Verification code queued. Please verify your phone number',
-                otp_id: otpId,
-                user_id: user.user_id,
-            };
-
-        } catch (error) {
-            this.logger.error('Registration failed');
-            if (error.code === 'P2002') {
-                throw new BadRequestException(
-                    error.meta?.target?.includes('phone')
-                        ? AUTH_ERROR_MESSAGES.MOBILE_ALREADY_REGISTERED
-                        : AUTH_ERROR_MESSAGES.EMAIL_ALREADY_REGISTERED
-                );
-            }
-            throw error;
-        }
+        await this.otpService.sendSignup(dto.phone, true);
+        return { message: 'If verification is available, a code will be sent' };
     }
 
     async login(dto: LoginDto) {
@@ -113,7 +61,7 @@ export class AuthService {
         }
 
         const tokens = await this.generateTokens(user);
-        await this.saveRefreshToken(user.user_id, tokens.refresh_token);
+        await this.saveCurrentSession(user, tokens.refresh_token);
         await this.userService.updateLastLogin(user.user_id);
 
         return {
@@ -131,48 +79,29 @@ export class AuthService {
     }
 
     async verifyOtp(dto: VerifyOtpDto) {
-        const otp = await this.otpService.verifyOtp(
-            dto.phone,
-            dto.code,
-            OtpType.PHONE_VERIFICATION,
-        );
-
-        const user = otp.user || (await this.userService.findByPhone(dto.phone));
-        if (!user) {
-            throw new BadRequestException(AUTH_ERROR_MESSAGES.USER_NOT_FOUND);
-        }
-
-        if (!user.is_verified) {
-            await this.userService.markAsVerified(user.user_id);
-        }
-
-        const tokens = await this.generateTokens(user);
-        await this.saveRefreshToken(user.user_id, tokens.refresh_token);
-        await this.userService.updateLastLogin(user.user_id);
-
-        return {
-            success: true,
-            tokens,
-            message: 'Verification successful',
-        };
+        const tokens = await this.otpService.verifyOtp(dto.phone, dto.code, OtpType.PHONE_VERIFICATION, async (tx, userId) => {
+            const user = await tx.user.update({
+                where: { user_id: userId },
+                data: {
+                    full_name: dto.full_name.trim(),
+                    full_name_ar: dto.full_name_ar?.trim() ?? null,
+                    email: dto.email?.toLowerCase() ?? null,
+                    role: dto.role ?? 'customer',
+                    password_hash: await bcrypt.hash(dto.password, AUTH_CONSTANTS.BCRYPT_ROUNDS),
+                    is_verified: true,
+                    last_seen_at: new Date(),
+                },
+            });
+            const session = await this.generateTokens(user);
+            await this.saveRefreshToken(user.user_id, session.refresh_token, tx);
+            return session;
+        });
+        return { success: true, tokens, message: 'Verification successful' };
     }
 
     async resendOtp(phone: string) {
-        const user = await this.userService.findByPhone(phone);
-        if (!user) {
-            throw new BadRequestException(AUTH_ERROR_MESSAGES.USER_NOT_FOUND);
-        }
-
-        const otpId = await this.otpService.resendOtp(
-            phone,
-            OtpType.PHONE_VERIFICATION,
-            user.user_id,
-        );
-
-        return {
-            message: 'New verification code sent',
-            otp_id: otpId,
-        };
+        await this.otpService.sendSignup(phone, false);
+        return { message: 'If verification is available, a code will be sent' };
     }
 
     async refreshToken(refreshToken: string) {
@@ -187,8 +116,13 @@ export class AuthService {
             throw new UnauthorizedException('Invalid refresh token');
         }
 
-        const tokens = await this.generateTokens(storedToken.user);
-        await this.prisma.$transaction(async tx => {
+        const tokens = await this.prisma.$transaction(async tx => {
+            await tx.$queryRaw`SELECT user_id FROM users WHERE user_id = ${storedToken.user_id} FOR UPDATE`;
+            const user = await tx.user.findUnique({ where: { user_id: storedToken.user_id } });
+            if (!user || user.sessionVersion !== storedToken.user.sessionVersion) {
+                throw new UnauthorizedException('Session changed');
+            }
+            const tokens = await this.generateTokens(user);
             const consumed = await tx.refreshToken.updateMany({
                 where: { token_id: storedToken.token_id, revoked_at: null, expires_at: { gt: new Date() } },
                 data: { revoked_at: new Date() },
@@ -199,6 +133,7 @@ export class AuthService {
                 token: crypto.createHash('sha256').update(tokens.refresh_token).digest('hex'),
                 expires_at: new Date(Date.now() + this.parseExpiryToSeconds(this.configService.get<string>('JWT_REFRESH_EXPIRES_IN', '7d')) * 1000),
             } });
+            return tokens;
         });
 
         return {
@@ -222,9 +157,10 @@ export class AuthService {
     }
 
     private async generateTokens(user: User): Promise<Tokens> {
-        if (!user.is_active) throw new ForbiddenException('Account disabled');
+        if (!user.is_active || !user.is_verified) throw new ForbiddenException('Account unavailable');
         const payload: JwtPayload = {
             sub: user.user_id,
+            sessionVersion: user.sessionVersion,
             phone: user.phone,
             role: user.role,
             isActive: user.is_active ?? false,
@@ -285,13 +221,24 @@ export class AuthService {
         return parseInt(value, 10) * (units[unit.toLowerCase()] || 1);
     }
 
-    private async saveRefreshToken(userId: number, token: string): Promise<void> {
+    private async saveCurrentSession(user: User, token: string) {
+        await this.prisma.$transaction(async tx => {
+            await tx.$queryRaw`SELECT user_id FROM users WHERE user_id = ${user.user_id} FOR UPDATE`;
+            const current = await tx.user.findUnique({ where: { user_id: user.user_id } });
+            if (!current?.is_active || current.sessionVersion !== user.sessionVersion) {
+                throw new UnauthorizedException('Session changed');
+            }
+            await this.saveRefreshToken(user.user_id, token, tx);
+        });
+    }
+
+    private async saveRefreshToken(userId: number, token: string, tx: Prisma.TransactionClient): Promise<void> {
         const refreshTokenExpiry = this.configService.get<string>('JWT_REFRESH_EXPIRES_IN', '7d');
         const expiresAt = new Date(Date.now() + this.parseExpiryToSeconds(refreshTokenExpiry) * 1000);
 
         const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-        await this.prisma.refreshToken.create({
+        await tx.refreshToken.create({
             data: {
                 user_id: userId,
                 token: tokenHash,
@@ -316,7 +263,7 @@ export class AuthService {
         const user = await this.userService.findById(userId);
         if (!user?.googleId || !user.is_active) throw new UnauthorizedException('Account unavailable');
         const tokens = await this.generateTokens(user);
-        await this.saveRefreshToken(user.user_id, tokens.refresh_token);
+        await this.saveCurrentSession(user, tokens.refresh_token);
         await this.userService.updateLastLogin(user.user_id);
         return { tokens, user: { id: user.user_id, email: user.email, full_name: user.full_name, role: user.role } };
     }

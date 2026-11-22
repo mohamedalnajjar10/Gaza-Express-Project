@@ -70,6 +70,12 @@ export default function Account() {
   const joined = profile.created_at ? new Date(profile.created_at) : null;
   const links = [
     {
+      to: '/addresses',
+      title: 'عنواني المحفوظ',
+      detail: 'تعديل موقعك وتفاصيل الوصول',
+      icon: MapPin,
+    },
+    {
       to: '/orders',
       title:
         profile.role === 'driver'
@@ -85,12 +91,6 @@ export default function Account() {
     },
     ...(profile.role === 'customer'
       ? [
-          {
-            to: '/addresses',
-            title: 'عناوين التوصيل',
-            detail: 'أماكنك المحفوظة لطلباتك القادمة',
-            icon: MapPin,
-          },
           {
             to: '/favorites',
             title: 'المفضلة',

@@ -12,6 +12,7 @@ import { ArrowLeft } from 'lucide-react';
 import { IdentityProvider, useIdentity } from '../shared/auth/identity';
 import { Layout } from './layout';
 import CatalogPage from '../features/catalog/catalog-page';
+import { DriverLocationProvider } from '../features/operations/driver-location';
 
 const StorePage = lazy(() => import('../features/catalog/store-page'));
 const Auth = lazy(() => import('../features/auth/auth-page'));
@@ -29,12 +30,14 @@ const Operations = lazy(() => import('../features/operations/operations-page'));
 
 function Protected() {
   const { profile } = useIdentity();
-  const { pathname, search } = useLocation();
-  return profile ? (
-    <Outlet />
-  ) : (
-    <Navigate to="/login" replace state={{ from: pathname + search }} />
-  );
+  const location = useLocation();
+  if (!profile) return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
+  if (profile.role === 'customer' && profile.addressPromptedAt === null && location.pathname !== '/addresses' && location.pathname !== '/checkout') {
+    return <Navigate to="/addresses" replace state={{ from: location.pathname + location.search, fromState: location.state, onboarding: true }} />;
+  }
+  return profile.role === 'driver' ? (
+    <DriverLocationProvider key={profile.user_id}><Outlet /></DriverLocationProvider>
+  ) : <Outlet />;
 }
 
 function CustomerOnly() {
@@ -64,9 +67,9 @@ export default function App() {
               <Route element={<CustomerOnly />}>
                 <Route path="cart" element={<Cart />} />
                 <Route path="checkout" element={<Checkout />} />
-                <Route path="addresses" element={<Addresses />} />
                 <Route path="favorites" element={<Favorites />} />
               </Route>
+              <Route path="addresses" element={<Addresses />} />
               <Route path="orders" element={<Orders />} />
               <Route path="orders/:id" element={<OrderDetail />} />
               <Route path="notifications" element={<Notifications />} />

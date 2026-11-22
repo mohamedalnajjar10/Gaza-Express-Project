@@ -31,6 +31,7 @@ export class ProductsService {
       }
     }
 
+    this.assertNonNullable(dto);
     const min = dto.estimatedPriceMin ?? 0;
     const max = dto.estimatedPriceMax ?? min;
     this.validatePrices(min, max, dto.isPriceFixed ?? false);
@@ -40,12 +41,16 @@ export class ProductsService {
     }));
   }
 
-  async findByStore(storeId: number, availableOnly = true, page: PageDto & { categoryId?: number; q?: string } = new PageDto()) {
+  async findByStore(storeId: number, availableOnly = true, page: PageDto & { categoryId?: number; q?: string } = new PageDto(), viewerId?: number) {
+    if (!availableOnly) {
+      if (viewerId === undefined) throw new ForbiddenException('Store ownership required');
+      await this.verifyStoreOwnership(storeId, viewerId);
+    }
     return this.prisma.product.findMany({
       ...pageWindow(page),
       where: {
         storeId,
-        ...(availableOnly && { isAvailable: true }),
+        ...(availableOnly && { isAvailable: true, store: { status: 'ACTIVE' } }),
         ...(page.q && { OR: [{ nameAr: { contains: page.q } }, { nameEn: { contains: page.q } }] }),
         ...(page.categoryId && {
           productCategory: {
@@ -62,40 +67,22 @@ export class ProductsService {
     });
   }
 
-  async bestSellers(storeId: number) {
-    const ranked = await this.prisma.$queryRaw<{ productId: number }[]>`
-      SELECT p.product_id AS productId
-      FROM customer_orders o
-      JOIN JSON_TABLE(o.itemSnapshots, '$[*]' COLUMNS (
-        productId INT PATH '$.productId',
-        quantity INT PATH '$.quantity'
-      )) AS item ON item.quantity > 0
-      JOIN products p ON p.product_id = item.productId AND p.store_id = o.storeId
-      JOIN stores s ON s.store_id = p.store_id AND s.status = 'ACTIVE'
-      WHERE o.storeId = ${storeId} AND o.status = 'DELIVERED' AND p.is_available = true
-      GROUP BY p.product_id
-      ORDER BY SUM(item.quantity) DESC, p.product_id ASC
-      LIMIT 12
-    `;
-    if (!ranked.length) return [];
-    const products = await this.prisma.product.findMany({
-      where: { storeId, isAvailable: true, productId: { in: ranked.map(row => row.productId) } },
+  bestSellers(storeId: number) {
+    return this.prisma.product.findMany({
+      where: { storeId, isAvailable: true, soldQuantity: { gt: 0 }, store: { status: 'ACTIVE' } },
+      orderBy: [{ soldQuantity: 'desc' }, { productId: 'asc' }],
+      take: 12,
       include: { productCategory: true, productOptions: { take: 20, orderBy: { optionId: 'asc' } } },
     });
-    const byId = new Map(products.map(product => [product.productId, product]));
-    return ranked.flatMap(({ productId }) => {
-      const product = byId.get(productId);
-      return product ? [product] : [];
-    });
   }
 
-  findOptions(productId: number, page: PageDto) {
-    return this.prisma.productOption.findMany({ where: { productId }, orderBy: { optionId: 'asc' }, ...pageWindow(page) });
+  findOptions(productId: number, page: PageDto, viewerId?: number) {
+    return this.prisma.productOption.findMany({ where: { productId, product: this.visibility(viewerId) }, orderBy: { optionId: 'asc' }, ...pageWindow(page) });
   }
 
-  async findOne(productId: number) {
+  async findOne(productId: number, viewerId?: number) {
     const product = await this.prisma.product.findUnique({
-      where: { productId },
+      where: { ...this.visibility(viewerId), productId },
       include: {
         store: { select: { storeName: true, storeNameAr: true } },
         productCategory: true,
@@ -108,7 +95,7 @@ export class ProductsService {
   }
 
   async update(userId: number, productId: number, dto: Partial<CreateProductDto>, image?: Buffer) {
-    const product = await this.findOne(productId);
+    const product = await this.findOne(productId, userId);
     await this.verifyStoreOwnership(product.storeId, userId);
 
     if (dto.prodCategoryId) {
@@ -120,16 +107,18 @@ export class ProductsService {
       }
     }
 
-    if (dto.estimatedPriceMin !== undefined || dto.estimatedPriceMax !== undefined || dto.isPriceFixed !== undefined) {
+    const changesPrice = dto.estimatedPriceMin !== undefined || dto.estimatedPriceMax !== undefined || dto.isPriceFixed !== undefined;
+    this.assertNonNullable(dto);
+    if (changesPrice) {
       this.validatePrices(dto.estimatedPriceMin ?? Number(product.estimatedPriceMin), dto.estimatedPriceMax ?? Number(product.estimatedPriceMax), dto.isPriceFixed ?? product.isPriceFixed);
     }
     const changesImage = image !== undefined || dto.imageUrl !== undefined;
     const updated = await this.saveImage(image, imageUrl => this.prisma.product.update({
-      where: { productId, ...(changesImage && { imageUrl: product.imageUrl }) },
+      where: { productId, ...(changesImage && { imageUrl: product.imageUrl }), ...(changesPrice && { estimatedPriceMin: product.estimatedPriceMin, estimatedPriceMax: product.estimatedPriceMax, isPriceFixed: product.isPriceFixed }) },
       data: { ...dto, ...(imageUrl && { imageUrl }) },
     })).catch(error => {
-      if (changesImage && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
-        throw new ConflictException('تغيّرت صورة المنتج. حدّث الصفحة وحاول مرة أخرى.');
+      if ((changesImage || changesPrice) && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+        throw new ConflictException('تغيّرت بيانات المنتج. حدّث الصفحة وحاول مرة أخرى.');
       }
       throw error;
     });
@@ -137,17 +126,14 @@ export class ProductsService {
     return updated;
   }
 
-  async toggleAvailability(userId: number, productId: number) {
-    const product = await this.findOne(productId);
+  async toggleAvailability(userId: number, productId: number, isAvailable: boolean) {
+    const product = await this.findOne(productId, userId);
     await this.verifyStoreOwnership(product.storeId, userId);
-    return this.prisma.product.update({
-      where: { productId },
-      data: { isAvailable: !product.isAvailable },
-    });
+    return this.prisma.product.update({ where: { productId }, data: { isAvailable } });
   }
 
   async delete(userId: number, productId: number) {
-    const product = await this.findOne(productId);
+    const product = await this.findOne(productId, userId);
     await this.verifyStoreOwnership(product.storeId, userId);
     const deleted = await this.prisma.product.delete({ where: { productId } });
     await this.media?.remove(deleted?.imageUrl);
@@ -175,6 +161,17 @@ export class ProductsService {
     }
   }
 
+  private assertNonNullable(dto: Partial<CreateProductDto>) {
+    for (const field of ['nameAr', 'estimatedPriceMin', 'estimatedPriceMax', 'isPriceFixed', 'isAvailable', 'sortOrder'] as const) {
+      if (dto[field] === null) throw new BadRequestException(`${field} cannot be null`);
+    }
+  }
+
+  private visibility(viewerId?: number): Prisma.ProductWhereInput {
+    const published: Prisma.ProductWhereInput = { isAvailable: true, store: { status: 'ACTIVE' } };
+    return viewerId === undefined ? published : { OR: [published, { store: { ownerId: viewerId } }] };
+  }
+
   private validatePrices(min: number, max: number, fixed: boolean) {
     if (max < min || (fixed && min !== max)) {
       throw new BadRequestException('تحقق من نطاق السعر. السعر الثابت يتطلب تساوي السعر الأدنى والأعلى.');
@@ -193,6 +190,7 @@ export class ProductsService {
       where: {
         storeId,
         isAvailable: true,
+        store: { status: 'ACTIVE' },
         OR: [
           { nameAr: { contains: query } },
           { nameEn: { contains: query } },

@@ -8,7 +8,7 @@ export class FavoritesService {
 
   // Store Favorites
   async addStoreToFavorites(userId: number, storeId: number) {
-    const store = await this.prisma.store.findUnique({ where: { storeId } });
+    const store = await this.prisma.store.findUnique({ where: { storeId, status: 'ACTIVE' } });
     if (!store) throw new NotFoundException('Store not found');
     return this.prisma.storeFavorite.create({
       data: { userId, storeId },
@@ -28,7 +28,7 @@ export class FavoritesService {
   async getMyFavoriteStores(userId: number, page = new PageDto()) {
     return this.prisma.storeFavorite.findMany({
       ...pageWindow(page), orderBy: { favoriteId: 'desc' },
-      where: { userId },
+      where: { userId, store: { status: 'ACTIVE' } },
       include: {
         store: {
           include: {
@@ -49,7 +49,7 @@ export class FavoritesService {
 
   // Product Favorites
   async addProductToFavorites(userId: number, productId: number) {
-    const product = await this.prisma.product.findUnique({ where: { productId } });
+    const product = await this.prisma.product.findUnique({ where: { productId, isAvailable: true, store: { status: 'ACTIVE' } } });
     if (!product) throw new NotFoundException('Product not found');
     return this.prisma.productFavorite.create({
       data: { userId, productId },
@@ -75,7 +75,7 @@ export class FavoritesService {
   async getMyFavoriteProducts(userId: number, page = new PageDto()) {
     return this.prisma.productFavorite.findMany({
       ...pageWindow(page), orderBy: { favoriteId: 'desc' },
-      where: { userId },
+      where: { userId, product: { isAvailable: true, store: { status: 'ACTIVE' } } },
       include: {
         product: {
           include: {

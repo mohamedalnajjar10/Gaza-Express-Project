@@ -10,7 +10,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AppModule } from '../src/app.module';
 import { RedisStorage } from '../src/infrastructure/redis.module';
 
-const actors = { customer: 'customer', stranger: 'customer', owner: 'store_owner', driver: 'driver', otherDriver: 'driver', admin: 'admin' } satisfies Record<string, UserRole>;
+const actors = {
+  customer: 'customer', stranger: 'customer', owner: 'store_owner', driver: 'driver', otherDriver: 'driver', admin: 'admin',
+  near: 'driver', far: 'driver', areaDriver: 'driver', companyDriver: 'driver', manager: 'store_owner', recoveryManager: 'store_owner',
+} satisfies Record<string, UserRole>;
 type Actor = keyof typeof actors;
 
 describe('Order lifecycle on MySQL', () => {
@@ -70,6 +73,8 @@ describe('Order lifecycle on MySQL', () => {
       await db.payment.deleteMany({ where: { order: { customerId: { in: ids } } } });
       await db.orderEvent.deleteMany({ where: { order: { customerId: { in: ids } } } });
       await db.customerOrder.deleteMany({ where: { customerId: { in: ids } } });
+      await db.driverProfile.deleteMany({ where: { userId: { in: ids } } });
+      await db.deliveryCompany.deleteMany({ where: { managerId: { in: ids } } });
       if (storeId) await db.storeModerationEvent.deleteMany({ where: { storeId } });
       if (storeId) await db.store.delete({ where: { storeId } });
       if (categoryId) await db.storeCategory.delete({ where: { categoryId } });
@@ -142,8 +147,17 @@ describe('Order lifecycle on MySQL', () => {
     await act('owner', ready.body, 'assign', { driverId: user('driver').id }).expect(403);
     await act('admin', ready.body, 'assign', { driverId: user('driver').id }).expect(409);
     await api('admin', 'patch', `/drivers/${user('driver').id}/approval`).send({ approved: true }).expect(200);
+    await api('customer', 'get', '/drivers/me/availability').expect(403);
+    const unavailable = await api('driver', 'get', '/drivers/me/availability').expect(200);
+    expect(unavailable.body).toMatchObject({ approved: true, available: false });
     await api('driver', 'patch', '/drivers/me/availability').send({ available: true }).expect(200);
+    const available = await api('driver', 'get', '/drivers/me/availability').expect(200);
+    expect(available.body.available).toBe(true);
     const offer = await act('admin', ready.body, 'assign', { driverId: user('driver').id }).expect(200);
+    const driverOffer = await api('driver', 'get', `/orders/${offer.body.id}`).expect(200);
+    expect(driverOffer.body).toMatchObject({ offerOnly: true });
+    expect(driverOffer.body).not.toHaveProperty('addressSnapshot');
+    expect(driverOffer.body).not.toHaveProperty('itemSnapshots');
     await act('driver', offer.body, 'pick_up').expect(409);
     const assigned = await act('driver', offer.body, 'accept_assignment').expect(200);
     await act('otherDriver', assigned.body, 'pick_up').expect(404);
@@ -221,6 +235,7 @@ describe('Order lifecycle on MySQL', () => {
     const quote = await act('owner', order.body, 'quote', { total: 26 }).expect(200);
     const accepted = await act('customer', quote.body, 'approve_quote').expect(200);
     const payment = await api('customer', 'get', `/orders/${order.body.id}/payment`).expect(200);
+    expect((await db.customerOrder.findUniqueOrThrow({ where: { id: order.body.id } })).dispatchOpenedAt).toBeNull();
     const reference = randomUUID();
     const reconcile = (actor: Actor, amount = 26) => api(actor, 'post', `/orders/${order.body.id}/payment/bank-reconciliation`).send({ amount, currency: 'ILS', reference });
     await act('owner', accepted.body, 'ready').expect(409);
@@ -236,6 +251,7 @@ describe('Order lifecycle on MySQL', () => {
     await reconcile('admin', 25).expect(400);
     await reconcile('admin').expect(200);
     await reconcile('admin').expect(200);
+    expect((await db.customerOrder.findUniqueOrThrow({ where: { id: order.body.id } })).dispatchOpenedAt).toBeInstanceOf(Date);
     expect(await db.paymentEntry.count({ where: { orderId: order.body.id, kind: 'COLLECTION' } })).toBe(1);
     await act('owner', accepted.body, 'ready').expect(200);
   });
@@ -255,6 +271,14 @@ describe('Order lifecycle on MySQL', () => {
     await hook(sign(order.body.id)).expect(200, { status: 'REFUND_REQUIRED' });
     await hook(sign(order.body.id)).expect(200, { status: 'REFUND_REQUIRED' });
     expect(await db.paymentEntry.count({ where: { orderId: order.body.id } })).toBe(1);
+    const refund = { amount: 26, currency: 'ILS', reference: randomUUID() };
+    const refundPath = `/orders/${order.body.id}/payment/refund`;
+    await api('customer', 'post', refundPath).send(refund).expect(403);
+    await api('admin', 'post', refundPath).send(refund).expect(200, { status: 'REFUNDED' });
+    await api('admin', 'post', refundPath).send(refund).expect(200, { status: 'REFUNDED' });
+    const ledger = await db.paymentEntry.findMany({ where: { orderId: order.body.id }, orderBy: { id: 'asc' } });
+    expect(ledger).toHaveLength(2);
+    expect(ledger[1]).toMatchObject({ kind: 'REFUND', debit: ledger[0].credit, credit: ledger[0].debit });
     expect((await db.customerOrder.findUniqueOrThrow({ where: { id: order.body.id } })).status).toBe('CANCELLED');
   });
 
@@ -273,6 +297,13 @@ describe('Order lifecycle on MySQL', () => {
     const results = await Promise.all(offers.map(offer => act('driver', offer, 'accept_assignment')));
     expect(results.map(result => result.status).sort()).toEqual([200, 409]);
     expect(await db.customerOrder.count({ where: { activeDriverId: user('driver').id } })).toBe(1);
+    const assigned = results.find(result => result.status === 200)!.body;
+    const pickedUp = await act('driver', assigned, 'pick_up').expect(200);
+    await act('driver', pickedUp.body, 'confirm_return', { reason: 'Customer unavailable' }).expect(403);
+    const returned = await act('admin', pickedUp.body, 'confirm_return', { reason: 'Store confirmed physical return' }).expect(200);
+    expect(returned.body).toMatchObject({ status: 'CANCELLED', activeDriverId: null, deliveryCodeExpiresAt: null });
+    expect(await db.customerOrder.count({ where: { activeDriverId: user('driver').id } })).toBe(0);
+    expect(await db.payment.findUnique({ where: { orderId: assigned.id } })).toMatchObject({ status: 'VOID' });
   });
 
   it.each([
@@ -313,4 +344,168 @@ describe('Order lifecycle on MySQL', () => {
     expect(await balance()).toBe(initial);
   });
 
+  it('prioritizes proximity and allows only one driver to claim the same order during preparation', async () => {
+    // The driver closer to the store is farther from the customer and loses on the combined distance.
+    for (const [driver, latitude] of [['near', 31.526], ['far', 31.48]] as const) {
+      await api('admin', 'patch', `/drivers/${user(driver).id}/approval`).send({ approved: true }).expect(200);
+      await api(driver, 'patch', '/drivers/me/availability').send({ available: true }).expect(200);
+      await api(driver, 'put', '/drivers/me/location').send({ latitude, longitude: 34.45 }).expect(204);
+    }
+    const savedAddress = await address('customer', { ...addressData, latitude: 31.54 });
+    const savedCart = await cart();
+    const order = (await checkout(savedAddress.body.id, savedCart.body.version).expect(201)).body;
+    const merchantView = (await api('owner', 'get', `/orders/${order.id}`).expect(200)).body;
+    expect(merchantView).toMatchObject({ customer: { full_name: 'customer' }, itemSnapshots: [{ quantity: 2 }] });
+    const quote = (await act('owner', order, 'quote', { total: 26 }).expect(200)).body;
+    const accepted = (await act('customer', quote, 'approve_quote').expect(200)).body;
+    const nearOffer = (await api('near', 'get', '/drivers/me/offers').expect(200)).body.find(offer => offer.id === order.id);
+    const farOffer = (await api('far', 'get', `/orders/${order.id}`).expect(200)).body;
+    expect(nearOffer).toMatchObject({ status: 'ACCEPTED', offerOnly: true, openOffer: { nearby: true, canClaim: true } });
+    expect(farOffer).toMatchObject({ offerOnly: true, openOffer: { nearby: false, canClaim: false } });
+    expect(farOffer.openOffer.pickupKm).toBeLessThan(nearOffer.openOffer.pickupKm);
+    expect(nearOffer).not.toHaveProperty('addressSnapshot');
+    expect(farOffer).not.toHaveProperty('customerId');
+    await act('far', accepted, 'claim_delivery').expect(409);
+    await act('customer', accepted, 'claim_delivery').expect(403);
+
+    await db.customerOrder.update({ where: { id: order.id }, data: { dispatchOpenedAt: new Date(Date.now() - 46_000) } });
+    const attempts = await Promise.all([act('near', accepted, 'claim_delivery'), act('far', accepted, 'claim_delivery')]);
+    expect(attempts.map(response => response.status).sort()).toEqual([200, 409]);
+    const assigned = attempts.find(response => response.status === 200)!.body;
+    const winner = assigned.driverId === user('near').id ? 'near' : 'far';
+    expect(assigned.status).toBe('ACCEPTED');
+    await act(winner, assigned, 'pick_up').expect(409);
+    const tracking = `/orders/${order.id}/driver-tracking`;
+    await api('stranger', 'get', tracking).expect(403);
+    await api('manager', 'get', tracking).expect(404);
+    const driver = (await api('owner', 'get', tracking).expect(200)).body.driver;
+    expect(driver).toMatchObject({ name: winner, location: { longitude: 34.45 } });
+    await api(winner, 'delete', '/drivers/me/location').expect(204);
+    expect((await api('owner', 'get', tracking).expect(200)).body.driver.location).toBeNull();
+    const ready = (await act('owner', assigned, 'ready').expect(200)).body;
+    expect(ready).toMatchObject({ status: 'ASSIGNED', driverId: assigned.driverId });
+    await act('owner', ready, 'cancel', { reason: 'Test completed' }).expect(200);
+    expect((await api('owner', 'get', tracking).expect(200)).body.driver).toBeNull();
+  });
+
+  it('requires a confirmed contract and lets the company manager dispatch only a company driver', async () => {
+    const company = (await api('admin', 'post', '/delivery-companies').send({
+      name: 'Dispatch test company', managerId: user('manager').id,
+    }).expect(201)).body;
+    expect((await api('admin', 'get', '/delivery-companies').expect(200)).body).toEqual(expect.arrayContaining([company]));
+    await api('admin', 'patch', `/drivers/${user('companyDriver').id}/approval`).send({ approved: true }).expect(200);
+    await api('admin', 'put', `/drivers/${user('companyDriver').id}/delivery-company`).send({ deliveryCompanyId: company.id }).expect(204);
+    await api('companyDriver', 'patch', '/drivers/me/availability').send({ available: true }).expect(200);
+    await api('companyDriver', 'put', '/drivers/me/location').send({ latitude: 31.5, longitude: 34.45 }).expect(204);
+    await api('admin', 'patch', `/drivers/${user('far').id}/approval`).send({ approved: true }).expect(200);
+    await api('far', 'patch', '/drivers/me/availability').send({ available: true }).expect(200);
+
+    const savedAddress = await address();
+    const savedCart = await cart();
+    const order = (await checkout(savedAddress.body.id, savedCart.body.version).expect(201)).body;
+    const contract = `/stores/${storeId}/delivery-contracts/${company.id}`;
+    await api('owner', 'put', `${contract}/request`).expect(204);
+    expect((await api('owner', 'get', `/stores/${storeId}/delivery-partners`).expect(200)).body)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: company.id, contract: 'PENDING' })]));
+    const queue = async () => (await api('manager', 'get', '/delivery-companies/me/queue').expect(200)).body;
+    expect((await queue()).requests).toEqual([{ storeId, name: 'Test shop' }]);
+    await act('owner', order, 'quote', { total: 26, deliveryCompanyId: company.id }).expect(409);
+    await api('owner', 'put', `${contract}/confirm`).expect(404);
+    await api('manager', 'put', `${contract}/confirm`).expect(204);
+    await api('admin', 'put', contract).expect(204);
+    const quote = (await act('owner', order, 'quote', { total: 26, deliveryCompanyId: company.id }).expect(200)).body;
+    const accepted = (await act('customer', quote, 'approve_quote').expect(200)).body;
+    expect(await queue()).toMatchObject({ orders: [{ id: order.id, status: 'ACCEPTED' }], drivers: [{ userId: user('companyDriver').id }] });
+    expect((await api('companyDriver', 'get', '/drivers/me/offers').expect(200)).body).toEqual([]);
+    await act('near', accepted, 'claim_delivery').expect(409);
+    await act('owner', accepted, 'company_assign', { driverId: user('companyDriver').id }).expect(404);
+    await act('manager', accepted, 'company_assign', { driverId: user('far').id }).expect(409);
+    const assigned = (await act('manager', accepted, 'company_assign', { driverId: user('companyDriver').id }).expect(200)).body;
+    expect(assigned).toMatchObject({ status: 'ACCEPTED', driverId: user('companyDriver').id });
+    await act('admin', assigned, 'reroute_delivery', { reason: 'Driver already assigned' }).expect(409);
+    expect(assigned).not.toHaveProperty('addressSnapshot');
+    expect((await api('owner', 'get', `/orders/${order.id}/driver-tracking`).expect(200)).body.driver)
+      .toMatchObject({ name: 'companyDriver', location: { latitude: 31.5 } });
+    expect((await queue()).orders).toEqual([]);
+  });
+
+  it('blocks a stale company quote and lets only an admin recover unassigned company deliveries', async () => {
+    const manager = user('recoveryManager');
+    const company = (await api('admin', 'post', '/delivery-companies').send({ name: 'Recovery team', managerId: manager.id }).expect(201)).body;
+    await api('admin', 'put', `/stores/${storeId}/delivery-contracts/${company.id}`).expect(204);
+    const savedAddress = await address();
+    const makeQuote = async (paymentMethod: 'CASH' | 'BANK_TRANSFER') => {
+      const savedCart = await cart();
+      const order = (await api('customer', 'post', '/orders').set('Idempotency-Key', randomUUID()).send({
+        cartVersion: savedCart.body.version, addressId: savedAddress.body.id, paymentMethod,
+      }).expect(201)).body;
+      return (await act('owner', order, 'quote', { total: 26, deliveryCompanyId: company.id }).expect(200)).body;
+    };
+    const accepted = (await act('customer', await makeQuote('CASH'), 'approve_quote').expect(200)).body;
+    const ready = (await act('owner', accepted, 'ready').expect(200)).body;
+    const prepaid = (await act('customer', await makeQuote('BANK_TRANSFER'), 'approve_quote').expect(200)).body;
+    const stale = await makeQuote('CASH');
+
+    await api('admin', 'delete', `/users/${manager.id}`).expect(200);
+    expect((await api('customer', 'get', `/orders/${stale.id}`).expect(200)).body.deliveryCompanyAvailable).toBe(false);
+    await act('customer', stale, 'approve_quote').expect(409);
+    expect(await db.payment.findUnique({ where: { orderId: stale.id } })).toBeNull();
+    const revised = (await act('owner', stale, 'quote', { total: 26, deliveryCompanyId: null }).expect(200)).body;
+    await act('customer', revised, 'approve_quote').expect(200);
+
+    const reason = 'Delivery company unavailable';
+    await act('owner', ready, 'reroute_delivery', { reason }).expect(403);
+    await act('admin', ready, 'reroute_delivery').expect(400);
+    const rerouted = (await act('admin', ready, 'reroute_delivery', { reason }).expect(200)).body;
+    expect(rerouted).toMatchObject({ status: 'READY', deliveryCompanyId: null, driverId: null });
+    expect(await db.orderEvent.findUnique({ where: { orderId_version: { orderId: ready.id, version: rerouted.version } } }))
+      .toMatchObject({ action: 'reroute_delivery', fromStatus: 'READY', toStatus: 'READY', details: { reason, previousDeliveryCompanyId: company.id } });
+    await act('admin', ready, 'reroute_delivery', { reason }).expect(409);
+
+    const unpaid = (await act('admin', prepaid, 'reroute_delivery', { reason }).expect(200)).body;
+    expect(unpaid).toMatchObject({ status: 'ACCEPTED', deliveryCompanyId: null, dispatchOpenedAt: null });
+    await act('owner', unpaid, 'ready').expect(409);
+  });
+
+  it('shows matching area offers and permits claiming with GPS unavailable', async () => {
+    await api('admin', 'patch', `/drivers/${user('areaDriver').id}/approval`).send({ approved: true }).expect(200);
+    await api('areaDriver', 'patch', '/drivers/me/availability').send({ available: true, dispatchAreaId: 2 }).expect(200);
+    const savedAddress = await address();
+    const savedCart = await cart();
+    const order = (await checkout(savedAddress.body.id, savedCart.body.version).expect(201)).body;
+    const quoted = (await act('owner', order, 'quote', { total: 26 }).expect(200)).body;
+    const accepted = (await act('customer', quoted, 'approve_quote').expect(200)).body;
+    const offers = () => api('areaDriver', 'get', '/drivers/me/offers').expect(200);
+    expect((await offers()).body.some(offer => offer.id === order.id)).toBe(false);
+    await api('areaDriver', 'patch', '/drivers/me/availability').send({ dispatchAreaId: 1 }).expect(200);
+    expect((await api('areaDriver', 'get', '/drivers/me/availability').expect(200)).body).toMatchObject({ available: true, dispatchAreaId: 1 });
+    await db.customerOrder.update({ where: { id: order.id }, data: { dispatchOpenedAt: new Date(Date.now() - 46_000) } });
+    const offer = (await offers()).body.find(offer => offer.id === order.id);
+    expect(offer).toMatchObject({ openOffer: { pickupKm: null, nearby: true, canClaim: true } });
+    const assigned = (await act('areaDriver', accepted, 'claim_delivery').expect(200)).body;
+    expect(assigned.driverId).toBe(user('areaDriver').id);
+    expect((await api('owner', 'get', `/orders/${order.id}/driver-tracking`).expect(200)).body.driver.location).toBeNull();
+  });
+
+  it('streams an authenticated invalidation after the checkout commits', async () => {
+    await request(app.getHttpServer()).get('/api/v1/orders/updates').expect(401);
+    await app.listen(0, '127.0.0.1');
+    const controller = new AbortController();
+    const deadline = AbortSignal.timeout(8_000);
+    try {
+      const response = await fetch(`${await app.getUrl()}/api/v1/orders/updates`, {
+        headers: { Authorization: `Bearer ${user('owner').token}` },
+        signal: AbortSignal.any([controller.signal, deadline]),
+      });
+      expect(response.headers.get('content-type')).toMatch(/^text\/event-stream/);
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      expect(decoder.decode((await reader.read()).value)).toContain('data: ready');
+      const savedAddress = await address();
+      const savedCart = await cart();
+      const submitted = (await checkout(savedAddress.body.id, savedCart.body.version).expect(201)).body;
+      expect(decoder.decode((await reader.read()).value)).toContain('data: changed');
+      await api('owner', 'get', `/orders/${submitted.id}`).expect(200);
+    } finally { controller.abort(); }
+  });
 });

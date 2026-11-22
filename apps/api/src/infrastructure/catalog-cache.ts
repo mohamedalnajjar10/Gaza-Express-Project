@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
@@ -6,6 +6,9 @@ import Redis from 'ioredis';
 @Injectable()
 export class CatalogCache implements OnModuleDestroy {
   private readonly client?: Redis;
+  private readonly logger = new Logger(CatalogCache.name);
+  private readonly counters = { hits: 0, misses: 0, fallbacks: 0, invalidationFailures: 0 };
+  private reporter?: NodeJS.Timeout;
   private readonly pending = new Map<string, Promise<unknown>>();
   private static readonly generation = 'catalog:v1:generation';
 
@@ -15,11 +18,17 @@ export class CatalogCache implements OnModuleDestroy {
     this.client = new Redis(url, { lazyConnect: true, connectTimeout: 300, commandTimeout: 150, maxRetriesPerRequest: 0, enableOfflineQueue: false });
     this.client.on('error', () => undefined);
     void this.client.connect().catch(() => undefined);
+    this.reporter = setInterval(() => {
+      if (Object.values(this.counters).some(Boolean)) this.logger.log({ event: 'catalog_cache', ...this.counters });
+      Object.assign(this.counters, { hits: 0, misses: 0, fallbacks: 0, invalidationFailures: 0 });
+    }, 60_000);
+    this.reporter.unref();
   }
 
   async read<T>(key: string, load: () => Promise<T>): Promise<T> {
     const client = this.client;
-    if (!client || client.status !== 'ready') return load();
+    if (!client) return load();
+    if (client.status !== 'ready') return this.fallback(load);
     let generation: string | null;
     try {
       generation = await client.get(CatalogCache.generation);
@@ -27,20 +36,25 @@ export class CatalogCache implements OnModuleDestroy {
         await client.set(CatalogCache.generation, randomUUID(), 'NX');
         generation = await client.get(CatalogCache.generation);
       }
-      if (!generation) return load();
-    } catch { return load(); }
+      if (!generation) return this.fallback(load);
+    } catch { return this.fallback(load); }
     const cacheKey = `catalog:v1:${generation}:${key}`;
     try {
       const value = await client.get(cacheKey);
-      if (value !== null) return JSON.parse(value) as T;
-    } catch { return load(); }
+      if (value !== null) {
+        const result = JSON.parse(value) as T;
+        this.counters.hits++;
+        return result;
+      }
+    } catch { return this.fallback(load); }
+    this.counters.misses++;
     const existing = this.pending.get(cacheKey);
     if (existing) return existing as Promise<T>;
     const pending = (async () => {
       const value = await load();
       const json = JSON.stringify(value);
       if (Buffer.byteLength(json) <= 128 * 1024) {
-        await client.set(cacheKey, json, 'EX', 20 + Math.floor(Math.random() * 6)).catch(() => undefined);
+        await client.set(cacheKey, json, 'EX', 20 + Math.floor(Math.random() * 6)).catch(() => { this.counters.fallbacks++; });
       }
       return value;
     })();
@@ -49,9 +63,14 @@ export class CatalogCache implements OnModuleDestroy {
     finally { this.pending.delete(cacheKey); }
   }
 
-  async invalidate() {
-    await this.client?.set(CatalogCache.generation, randomUUID()).catch(() => undefined);
+  private fallback<T>(load: () => Promise<T>) {
+    this.counters.fallbacks++;
+    return load();
   }
 
-  onModuleDestroy() { this.client?.disconnect(); }
+  async invalidate() {
+    await this.client?.set(CatalogCache.generation, randomUUID()).catch(() => { this.counters.invalidationFailures++; });
+  }
+
+  onModuleDestroy() { clearInterval(this.reporter); this.client?.disconnect(); }
 }

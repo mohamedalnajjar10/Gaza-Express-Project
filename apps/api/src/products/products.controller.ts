@@ -1,3 +1,5 @@
+import type { AuthenticatedRequest } from '../common/authenticated-request';
+import { ProductAvailabilityDto } from 'src/common/dto/catalog-state.dto';
 import { PageDto } from 'src/common/dto/page.dto';
 import { ProductListDto, ProductSearchDto } from './dto/product-list.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -23,9 +25,9 @@ export class ProductsController {
   @ApiOperation({ summary: 'Get products by store' })
   findByStore(
     @Param('storeId', ParseIntPipe) storeId: number,
-    @Query() query: ProductListDto
+    @Query() query: ProductListDto, @Request() req: AuthenticatedRequest
   ) {
-    return this.service.findByStore(storeId, query.availableOnly !== 'false', query);
+    return this.service.findByStore(storeId, query.availableOnly !== 'false', query, req.user.user_id);
   }
 
   @Get('store/:storeId/best-sellers')
@@ -45,15 +47,15 @@ export class ProductsController {
 
   @Get(':id/options')
   @UseGuards(JwtAuthGuard)
-  options(@Param('id', ParseIntPipe) id: number, @Query() page: PageDto) {
-    return this.service.findOptions(id, page);
+  options(@Param('id', ParseIntPipe) id: number, @Query() page: PageDto, @Request() req: AuthenticatedRequest) {
+    return this.service.findOptions(id, page, req.user.user_id);
   }
 
   @Get(':id')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Get product details' })
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.service.findOne(id);
+  findOne(@Param('id', ParseIntPipe) id: number, @Request() req: AuthenticatedRequest) {
+    return this.service.findOne(id, req.user.user_id);
   }
 
   @Get('images/:name')
@@ -69,7 +71,7 @@ export class ProductsController {
   @ApiConsumes('application/json', 'multipart/form-data')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Create product (store owners)' })
-  create(@Request() req, @Body() dto: CreateProductDto, @UploadedFile() image?: { buffer: Buffer }) {
+  create(@Request() req: AuthenticatedRequest, @Body() dto: CreateProductDto, @UploadedFile() image?: { buffer: Buffer }) {
     return this.service.create(req.user.user_id, dto, image?.buffer);
   }
 
@@ -79,23 +81,23 @@ export class ProductsController {
   @ApiConsumes('application/json', 'multipart/form-data')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Update product (owner only)' })
-  update(@Request() req, @Param('id', ParseIntPipe) id: number, @Body() dto: UpdateProductDto, @UploadedFile() image?: { buffer: Buffer }) {
+  update(@Request() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: UpdateProductDto, @UploadedFile() image?: { buffer: Buffer }) {
     return this.service.update(req.user.user_id, id, dto, image?.buffer);
   }
 
   @Patch(':id/toggle-availability')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Toggle product availability (owner only)' })
-  toggleAvailability(@Request() req, @Param('id', ParseIntPipe) id: number) {
-    return this.service.toggleAvailability(req.user.user_id, id);
+  @ApiOperation({ summary: 'Set product availability (owner only)' })
+  toggleAvailability(@Request() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: ProductAvailabilityDto) {
+    return this.service.toggleAvailability(req.user.user_id, id, dto.isAvailable);
   }
 
   @Delete(':id')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Delete product (owner only)' })
-  delete(@Request() req, @Param('id', ParseIntPipe) id: number) {
+  delete(@Request() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number) {
     return this.service.delete(req.user.user_id, id);
   }
 }

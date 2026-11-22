@@ -27,6 +27,7 @@ test('customer searches, adds a product, checks out and cancels', async ({page})
     const request = route.request();
     const path = new URL(request.url()).pathname.replace('/api/v1','');
     const method = request.method();
+    if (path === '/orders/updates') return route.fulfill({ status: 503 });
     if (path.startsWith('/stores') || path.startsWith('/products') || path === '/store-categories') {
       catalogRequests++;
       expect(request.headers().authorization).toBe(`Bearer ${tokens.access_token}`);
@@ -124,6 +125,7 @@ test('driver completes delivery with code and collected amount', async ({page}) 
   let status = 'IN_TRANSIT';
   await page.route('**/api/v1/**', async route => {
     const path = new URL(route.request().url()).pathname.replace('/api/v1','');
+    if (path === '/orders/updates') return route.fulfill({ status: 503 });
     if (path === '/auth/login') return success(route,{tokens});
     if (path === '/auth/profile') return success(route,{user_id:11,role:'driver',full_name:'سائق تجريبي'});
     if (path === '/orders/51/status') {
@@ -151,6 +153,7 @@ test('admin adds the first store category and owner submits a store', async ({ p
     const path = new URL(request.url()).pathname.replace('/api/v1', '');
     if (path === '/auth/login') return success(route, { tokens });
     if (path === '/auth/profile') return success(route, { user_id: 10, role });
+    if (path === '/delivery-companies/me/queue') return success(route, null);
     if (path === '/stores/moderation' || path === '/stores/my-stores') return success(route, stores);
     if (path === '/store-categories') {
       if (request.method() === 'POST') {
@@ -163,8 +166,7 @@ test('admin adds the first store category and owner submits a store', async ({ p
     if (path === '/stores' && request.method() === 'POST') {
       expect(role).toBe('store_owner');
       expect(request.postDataJSON()).toMatchObject({ categoryId: 1, areaId: 5, fullAddressAr: 'شارع السوق بجوار المخبز' });
-      expect(request.postDataJSON()).not.toHaveProperty('latitude');
-      expect(request.postDataJSON()).not.toHaveProperty('longitude');
+      expect(request.postDataJSON()).toMatchObject({ latitude: 31.5, longitude: 34.4, deliveryRangeKm: 10 });
       stores.push({ ...request.postDataJSON(), storeId: 1, status: 'PENDING_APPROVAL', isOpenNow: true });
       return success(route, stores[0]);
     }
@@ -188,8 +190,8 @@ test('admin adds the first store category and owner submits a store', async ({ p
   await ownerPage.getByLabel('اسم المتجر بالعربية').fill('متجر تجريبي');
   await ownerPage.getByLabel('اسم المتجر بالإنجليزية').fill('Test store');
   await expect(ownerPage.getByLabel('رقم المنطقة')).toHaveCount(0);
-  await expect(ownerPage.getByLabel('خط العرض')).toHaveCount(0);
-  await expect(ownerPage.getByLabel('خط الطول')).toHaveCount(0);
+  await ownerPage.getByLabel('خط العرض للمتجر', { exact: true }).fill('31.5');
+  await ownerPage.getByLabel('خط الطول للمتجر', { exact: true }).fill('34.4');
   await expect(ownerPage.getByLabel('المحافظة').locator('option')).toHaveText([
     'اختر المحافظة', 'غزة', 'خانيونس', 'رفح', 'دير البلح', 'النصيرات', 'المغازي', 'جباليا',
   ]);
@@ -212,6 +214,7 @@ test('store owner creates a section and saves a product with a multipart image',
     const path = new URL(request.url()).pathname.replace('/api/v1', '');
     if (path === '/auth/login') return success(route, { tokens });
     if (path === '/auth/profile') return success(route, { user_id: 10, role: 'store_owner' });
+    if (path === '/delivery-companies/me/queue') return success(route, null);
     if (path === '/stores/my-stores') return success(route, [{ ...store, status: 'ACTIVE' }]);
     if (path === '/store-categories') return success(route, [{ categoryId: 1, nameAr: 'مخابز' }]);
     if (path === '/product-categories') {

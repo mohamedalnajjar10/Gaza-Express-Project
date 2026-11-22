@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Search, RefreshCw, ArrowLeft, ReceiptText } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../../shared/api/client';
@@ -7,10 +7,15 @@ import { orderLabels } from './status-labels';
 import { Empty, Result, Title } from '../../shared/ui/feedback';
 import { useResource } from '../../shared/hooks/use-resource';
 import { useIdentity } from '../../shared/auth/identity';
+import { usePolling } from '../../shared/hooks/use-polling';
+import { useOrderUpdates } from './use-order-updates';
+import { DriverLocationControl } from '../operations/driver-location';
+import { DriverAreaPicker } from '../operations/driver-availability';
+import './dispatch.css';
 
 const driverSections = [
   { label: 'عروض التوصيل', statuses: ['READY'] },
-  { label: 'التوصيل الجاري', statuses: ['ASSIGNED', 'IN_TRANSIT'] },
+  { label: 'التوصيل الجاري', statuses: ['ACCEPTED', 'ASSIGNED', 'IN_TRANSIT'] },
   { label: 'سجل التوصيل', statuses: ['DELIVERED', 'CANCELLED', 'REJECTED'] },
 ];
 
@@ -19,13 +24,20 @@ function OrderList({ orders }: { orders: Order[] }) {
     <div className="stack">
       {orders.map((order) => (
         <Link
-          className="surface padded list-row"
+          className={`surface padded list-row${order.openOffer?.nearby ? ' delivery-nearby' : ''}`}
           to={`/orders/${order.id}`}
           key={order.id}
         >
           <div>
             <strong>طلب #{order.id}</strong>
             <p>{order.storeName}</p>
+            {order.openOffer && <div className="delivery-offer-labels">
+              {order.openOffer.nearby && <span className="badge delivery-nearby-label">
+                {order.openOffer.pickupKm === null ? 'ضمن منطقة التوصيل' : 'طلب قريب منك'}
+              </span>}
+              {order.openOffer.pickupKm !== null && <small>{order.openOffer.pickupKm} كم إلى المتجر تقريبًا</small>}
+              {!order.openOffer.canClaim && <small>الأولوية للسائق الأقرب</small>}
+            </div>}
           </div>
           <span className="badge">
             {orderLabels[order.status] || order.status}
@@ -56,6 +68,15 @@ export default function Orders() {
       ),
     `orders:${before}`,
   );
+  const isDriver = profile?.role === 'driver';
+  const offers = useResource(signal => isDriver ? api<Order[]>('/drivers/me/offers', { signal }) : Promise.resolve([]), `independent-offers:${isDriver}`);
+  const refresh = useCallback(() => {
+    state.reload();
+    if (isDriver) offers.reload();
+  }, [isDriver, state.reload, offers.reload]);
+  const connected = useOrderUpdates(refresh, !before);
+  usePolling(state.reload, 10_000, !before && !connected);
+  usePolling(offers.reload, connected ? 30_000 : 8_000, isDriver);
   return (
     <>
       <Title
@@ -66,6 +87,7 @@ export default function Orders() {
             : undefined
         }
       />
+      {isDriver && <IndependentOffers state={offers} />}
       {profile?.role === 'store_owner' && (
         <div className="owner-orders-tools surface padded">
           <div className="owner-section-heading">
@@ -173,4 +195,15 @@ export default function Orders() {
       </Result>
     </>
   );
+}
+
+function IndependentOffers({ state }: { state: { data?: Order[]; error?: unknown; reload: () => void } }) {
+  return <section className="stack" aria-label="فرص التوصيل المستقلة">
+    <h2>فرص التوصيل المستقلة</h2>
+    <div className="surface padded"><DriverLocationControl /><DriverAreaPicker onSaved={state.reload} /></div>
+    <Result state={state}>{offers => offers.length
+      ? <OrderList orders={offers} />
+      : <p>لا توجد فرص توصيل مستقلة متاحة لك حاليًا.</p>
+    }</Result>
+  </section>;
 }

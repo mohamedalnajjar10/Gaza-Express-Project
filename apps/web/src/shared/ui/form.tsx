@@ -30,7 +30,7 @@ export function ActionForm({
     <form onSubmit={onSubmit} className="form" aria-busy={pending}>
       {children}
       {error ? <ErrorBox error={error} /> : null}
-      <button disabled={pending}>{pending ? 'جارٍ التنفيذ…' : label}</button>
+      <button type="submit" disabled={pending}>{pending ? 'جارٍ التنفيذ…' : label}</button>
     </form>
   );
 }

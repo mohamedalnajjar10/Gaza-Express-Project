@@ -10,7 +10,7 @@ import type { Product } from '../catalog/types';
 import { getCart, replaceCart, type Cart } from './cart-api';
 import './cart.css';
 
-function price(min?: string | number, max?: string | number) {
+function price(min?: string | number | null, max?: string | number | null) {
   if (min == null) return '—';
   return max != null && Number(min) !== Number(max) ? `${money(min)} – ${money(max)}` : money(min);
 }

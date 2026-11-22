@@ -9,8 +9,8 @@ jobs:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -26,6 +26,10 @@ jobs:
       run:
         working-directory: apps/api
     services:
+      redis:
+        image: redis:7.4-alpine
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
       mysql:
         image: mysql:8.4
         env:
@@ -41,14 +45,15 @@ jobs:
           --health-timeout=5s
           --health-retries=20
     env:
+      E2E_ALLOW_DATABASE: '1'
       DATABASE_URL: mysql://ci:ci@127.0.0.1:3306/wasla_test
       REDIS_URL: redis://127.0.0.1:6379/1
       GOOGLE_CLIENT_ID: ci-client
       GOOGLE_CLIENT_SECRET: ci-secret
       GOOGLE_CALLBACK_URL: http://localhost:5051/api/v1/auth/google/callback
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -64,7 +69,12 @@ jobs:
           export JWT_SECRET="$(openssl rand -hex 64)"
           export JWT_REFRESH_SECRET="$(openssl rand -hex 64)"
           npm run test:e2e -- --runInBand
+      - run: npm run test:redis
+      - run: npm audit --omit=dev --audit-level=high
       - name: Build the deployable Docker image
         run: |
           docker build --tag wasla-backend:ci .
           docker build --target migrator --tag wasla-migrator:ci .
+      - name: Smoke test migrations, readiness routing and media through Docker
+        run: bash infra/compose-smoke.sh
+        working-directory: .

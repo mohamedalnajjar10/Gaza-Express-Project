@@ -43,6 +43,8 @@ export class ProfileService {
         },
         select: {
           user_id: true,
+          addressPromptedAt: true,
+          defaultAddressId: true,
           full_name: true,
           full_name_ar: true,
           email: true,

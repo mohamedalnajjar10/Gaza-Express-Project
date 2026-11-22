@@ -1,3 +1,4 @@
+import type { AuthenticatedRequest } from '../common/authenticated-request';
 import { ResendOtpDto } from './dto/resend-otp.dto';
 import {
     Controller,
@@ -45,9 +46,8 @@ export class AuthController {
     @Public()
     @Post('register')
     @HttpCode(HttpStatus.CREATED)
-    @ApiOperation({ summary: 'Create new account - OTP will be sent' })
-    @ApiResponse({ status: 201, description: 'Account created successfully' })
-    @ApiResponse({ status: 409, description: 'Phone number already registered' })
+    @ApiOperation({ summary: 'Request a registration verification code' })
+    @ApiResponse({ status: 201, description: 'Verification requested' })
     async register(@Body() registerDto: RegisterDto) {
         return this.authService.register(registerDto);
     }
@@ -96,7 +96,7 @@ export class AuthController {
     @HttpCode(HttpStatus.OK)
     @ApiOperation({ summary: 'Logout' })
     @ApiBearerAuth()
-    async logout(@Request() req, @Body() dto: RefreshTokenDto) {
+    async logout(@Request() req: AuthenticatedRequest, @Body() dto: RefreshTokenDto) {
         const userId = req.user?.user_id;
         if (!userId) {
             throw new UnauthorizedException('User not authenticated');
@@ -108,7 +108,7 @@ export class AuthController {
     @Get('profile')
     @ApiOperation({ summary: 'Get current user data' })
     @ApiBearerAuth()
-    async getProfile(@Request() req) {
+    async getProfile(@Request() req: AuthenticatedRequest) {
         return this.userService.findOnePublic(req.user.user_id);
     }
 

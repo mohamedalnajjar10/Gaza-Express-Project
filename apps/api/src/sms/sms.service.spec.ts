@@ -2,6 +2,7 @@ import { ConfigService } from '@nestjs/config';
 import { TwilioSmsProvider, createSmsProvider } from './sms.provider';
 import { SmsService } from './sms.service';
 import type { Prisma } from '@prisma/client';
+import { validateEnvironment, validateSmsEnvironment } from '../config/environment';
 
 const config = () => new ConfigService({
   NODE_ENV: 'test', SMS_PROVIDER: 'fake', SMS_OUTBOX_KEY: 'a'.repeat(64),
@@ -43,5 +44,21 @@ describe('SMS outbox and provider', () => {
   it.each([[429, 'retry'], [400, 'failed'], [503, 'unknown']] as const)('classifies HTTP %s as %s', async (status, expected) => {
     jest.spyOn(global, 'fetch').mockResolvedValue(new Response(null, { status }));
     await expect(new TwilioSmsProvider(config()).send('+970591234567', '123456', new Date())).resolves.toMatchObject({ status: expected });
+  });
+
+  it('validates the production API and worker with only their own SMS secrets', () => {
+    const outbox = { NODE_ENV: 'production', SMS_PROVIDER: 'twilio', SMS_OUTBOX_KEY: 'a'.repeat(64) };
+    const api = {
+      ...outbox, DATABASE_URL: 'mysql://api:example@localhost/wasla', REDIS_URL: 'redis://localhost',
+      JWT_SECRET: 'b'.repeat(64), JWT_REFRESH_SECRET: 'c'.repeat(64),
+      OTP_SIGNING_SECRET: 'd'.repeat(64), DELIVERY_CODE_SECRET: 'e'.repeat(64),
+    };
+    expect(validateEnvironment(api)).toBe(api);
+    expect(() => validateSmsEnvironment(outbox)).toThrow('Twilio credentials');
+    const worker = {
+      ...outbox, TWILIO_ACCOUNT_SID: `AC${'1'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'fixture',
+      TWILIO_MESSAGING_SERVICE_SID: `MG${'2'.repeat(32)}`,
+    };
+    expect(validateSmsEnvironment(worker)).toBe(worker);
   });
 });

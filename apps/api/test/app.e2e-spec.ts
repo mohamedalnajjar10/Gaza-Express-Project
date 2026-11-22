@@ -63,6 +63,7 @@ describe('Foundation integration: real MySQL, real JWT, fake external delivery a
   });
   it('reports dependency failures separately from liveness', async () => {
     await request(app.getHttpServer()).get('/api/v1/ready').expect(200);
+    await request(app.getHttpServer()).get('/api/v1/routing-ready').expect(200);
     ping.mockRejectedValueOnce(new Error('Redis unavailable'));
     await request(app.getHttpServer()).get('/api/v1/ready').expect(503);
     await request(app.getHttpServer()).get('/api/v1/health').expect(200);
@@ -93,12 +94,32 @@ describe('Foundation integration: real MySQL, real JWT, fake external delivery a
     expect(verify).toEqual(resend);
     expect([login[0], verify[0], refresh[0]]).toEqual([stores[0], stores[0], stores[0]]);
     expect(new Set([login[1][0], verify[1][0], refresh[1][0]]).size).toBe(3);
-    expect(login[1].slice(1)).toEqual([900_000, 5, 900_000, 'auth']);
+    expect(login[1].slice(1)).toEqual([900_000, 60, 900_000, 'auth']);
     expect(refresh[1].slice(1)).toEqual([60_000, 20, 60_000, 'auth']);
 
     increment.mockResolvedValueOnce(available)
       .mockResolvedValueOnce({ ...available, isBlocked: true, timeToBlockExpire: 19 });
     await server.post('/api/v1/auth/login').expect('Retry-After', '19').expect(429);
+  });
+  it('limits repeated attempts against a phone without blocking other phones on the same IP', async () => {
+    const hits = new Map<string, number>();
+    increment.mockImplementation(async (key: string, _ttl: number, limit: number) => {
+      const count = (hits.get(key) ?? 0) + 1;
+      hits.set(key, count);
+      const isBlocked = count > limit;
+      return { ...available, totalHits: count, isBlocked, timeToBlockExpire: isBlocked ? 900 : 0 };
+    });
+    try {
+      const server = request(app.getHttpServer());
+      const login = (phone: string) => server.post('/api/v1/auth/login').send({ phone });
+      for (let index = 0; index < 5; index++) await login('0599876543').expect(400);
+      await login('0599876543').expect('Retry-After', '900').expect(429);
+      for (let index = 0; index < 6; index++) await login(`059123456${index}`).expect(400);
+      const phoneCounters = increment.mock.calls.filter(call => call[4] === 'auth-phone');
+      expect(phoneCounters.every(call => /^[a-f0-9]{64}$/.test(call[0]) && call[2] === 5)).toBe(true);
+    } finally {
+      increment.mockResolvedValue(available);
+    }
   });
   it('keeps Google OAuth disabled until a provider is explicitly configured', async () => {
     await request(app.getHttpServer()).get('/api/v1/auth/google').expect(404);
@@ -122,7 +143,7 @@ describe('Foundation integration: real MySQL, real JWT, fake external delivery a
   });
   it('serializes simultaneous OTP issuance and resend across independent service instances', async () => {
     const first = app.get(OtpService);
-    const second = new OtpService(db, sms as any, { get: (_: string, fallback: any) => fallback } as any);
+    const second = new OtpService(db, sms as any, { get: (key: string, fallback: any) => key === 'OTP_SIGNING_SECRET' ? 'test-only-signing-key' : fallback } as any);
     const results = await Promise.allSettled([
       first.sendOtp(owner.phone, OtpType.PHONE_VERIFICATION, owner.user_id),
       second.resendOtp(owner.phone, OtpType.PHONE_VERIFICATION, owner.user_id),
@@ -149,7 +170,7 @@ describe('Foundation integration: real MySQL, real JWT, fake external delivery a
     expect(await db.smsJob.findUniqueOrThrow({ where: { id: retry.id } })).toMatchObject({ status: 'ACCEPTED', attempts: 2, payload: null });
   });
   it('quarantines an uncertain provider result without retrying or keeping the code', async () => {
-    const otp = await db.otpCode.create({ data: { user_id: owner.user_id, phone: owner.phone, code: 'fixture', type: OtpType.LOGIN, expires_at: new Date(Date.now() + 120000) } });
+    const otp = await db.otpCode.create({ data: { user_id: owner.user_id, phone: owner.phone, code: 'fixture', challenge: randomUUID(), type: OtpType.LOGIN, expires_at: new Date(Date.now() + 120000) } });
     const job = await db.$transaction(tx => sms.enqueueVerification(tx, otp.otp_id, '456789', otp.expires_at));
     const send = jest.fn().mockRejectedValue(new Error('timeout'));
     const worker = new SmsWorker(db, sms, { send });
@@ -161,12 +182,12 @@ describe('Foundation integration: real MySQL, real JWT, fake external delivery a
   it('rolls back OTP issuance if enqueue fails', async () => {
     const enqueue = jest.spyOn(sms, 'enqueueVerification').mockRejectedValueOnce(new Error('queue write failed'));
     try {
-      await expect(app.get(OtpService).sendOtp(other.phone, OtpType.PHONE_VERIFICATION, other.user_id)).rejects.toThrow('Failed to send verification code');
+      await expect(app.get(OtpService).sendOtp(other.phone, OtpType.PHONE_VERIFICATION, other.user_id)).rejects.toThrow('queue write failed');
       expect(await db.otpCode.count({ where: { user_id: other.user_id } })).toBe(0);
     } finally { enqueue.mockRestore(); }
   });
   it('stops after the third provider rate limit and erases the encrypted code', async () => {
-    const otp = await db.otpCode.create({ data: { user_id: owner.user_id, phone: owner.phone, code: 'fixture', type: OtpType.LOGIN, expires_at: new Date(Date.now() + 120000) } });
+    const otp = await db.otpCode.create({ data: { user_id: owner.user_id, phone: owner.phone, code: 'fixture', challenge: randomUUID(), type: OtpType.LOGIN, expires_at: new Date(Date.now() + 120000) } });
     const job = await db.$transaction(tx => sms.enqueueVerification(tx, otp.otp_id, '456789', otp.expires_at));
     const send = jest.fn().mockResolvedValue({ status: 'retry', code: 'rate_limited' });
     const worker = new SmsWorker(db, sms, { send });
@@ -177,6 +198,37 @@ describe('Foundation integration: real MySQL, real JWT, fake external delivery a
     await worker.runOnce();
     expect(send).toHaveBeenCalledTimes(3);
     expect(await db.smsJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'FAILED', attempts: 3, payload: null });
+  });
+  it('retires a queued legacy OTP without sending it and allows a replacement immediately', async () => {
+    const account = await db.user.create({ data: {
+      phone: `legacy-${randomUUID().slice(0, 12)}`, full_name: 'Pending', password_hash: '',
+    } });
+    try {
+      const service = app.get(OtpService);
+      const type = OtpType.PHONE_VERIFICATION;
+      const legacy = { user_id: account.user_id, phone: account.phone, type, code: 'legacy', expires_at: new Date(Date.now() + 120_000) };
+      const oldest = await db.otpCode.create({ data: legacy });
+      await db.otpCode.createMany({ data: Array.from({ length: 4 }, () => legacy) });
+      const job = await db.$transaction(tx => sms.enqueueVerification(tx, oldest.otp_id, '123456', oldest.expires_at));
+      const send = jest.fn().mockResolvedValue({ status: 'accepted', providerId: 'fixture' });
+      const worker = new SmsWorker(db, sms, { send });
+      await worker.runOnce();
+      expect(send).not.toHaveBeenCalled();
+      expect(await db.smsJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({
+        status: 'EXPIRED', payload: null, leaseUntil: null, errorCode: 'legacy_challenge',
+      });
+
+      const replacementId = await service.resendOtp(account.phone, type, account.user_id);
+      const replacement = await db.smsJob.findUniqueOrThrow({ where: { otpId: replacementId } });
+      const code = sms.decrypt(replacement);
+      await expect(service.resendOtp(account.phone, type, account.user_id)).rejects.toThrow('Please wait');
+      await db.otpCode.create({ data: legacy });
+      await expect(service.verifyOtp(account.phone, code, type, async (_tx, userId) => userId)).resolves.toBe(account.user_id);
+    } finally {
+      const codes = await db.otpCode.findMany({ where: { user_id: account.user_id }, select: { otp_id: true } });
+      await db.smsJob.deleteMany({ where: { otpId: { in: codes.map(code => code.otp_id) } } });
+      await db.user.delete({ where: { user_id: account.user_id } });
+    }
   });
   it('only accepts one concurrent refresh and stores one replacement', async () => {
     const raw = randomUUID();

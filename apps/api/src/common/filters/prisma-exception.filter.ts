@@ -30,7 +30,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         }
 
         else if (exception instanceof Prisma.PrismaClientKnownRequestError) {
-            this.logger.error(`Prisma Error: ${exception.code}`);
+            this.logger.error({ event: 'prisma_error', code: exception.code, requestId: response.getHeader('X-Request-ID') });
 
             switch (exception.code) {
                 case 'P2002': 
@@ -52,7 +52,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         }
 
         else {
-            this.logger.error('Unexpected request error');
+            this.logger.error({ event: 'unexpected_http_error', requestId: response.getHeader('X-Request-ID') });
         }
 
         response.status(status).json({

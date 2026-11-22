@@ -9,23 +9,15 @@ import {
   Search,
   RefreshCw,
 } from 'lucide-react';
-import { api, json } from '../../shared/api/client';
+import { ApiError, api, json } from '../../shared/api/client';
 import Products from './store-products';
 import { storeStatuses, type ManagedStore } from './store-status';
 import { Empty, Result } from '../../shared/ui/feedback';
 import { ActionForm, Field } from '../../shared/ui/form';
 import { useResource } from '../../shared/hooks/use-resource';
 import { Pager } from '../../shared/ui/pager';
-
-const governorates = [
-  { id: 1, name: 'غزة' },
-  { id: 2, name: 'خانيونس' },
-  { id: 3, name: 'رفح' },
-  { id: 4, name: 'دير البلح' },
-  { id: 5, name: 'النصيرات' },
-  { id: 6, name: 'المغازي' },
-  { id: 7, name: 'جباليا' },
-];
+import { StoreDeliveryPartners } from './delivery-partners';
+import { deliveryAreas as governorates } from '../../shared/lib/delivery-areas';
 
 export default function OwnerStores() {
   const [page, setPage] = useState(1);
@@ -229,13 +221,12 @@ export default function OwnerStores() {
                     <ActionForm
                       label={store.isOpenNow ? 'إغلاق المتجر' : 'فتح المتجر'}
                       submit={async () => {
-                        await api(`/stores/${store.storeId}/toggle-status`, {
-                          method: 'PATCH',
-                        });
+                        await api(`/stores/${store.storeId}/toggle-status`, json('PATCH', { isOpenNow: !store.isOpenNow }));
                         state.reload();
                       }}
                     />
                   )}
+                  <StoreDeliveryPartners storeId={store.storeId} />
                   <details>
                     <summary>تعديل بيانات المتجر</summary>
                     <Result state={categories}>
@@ -302,7 +293,13 @@ function StoreForm({
             categoryId,
             areaId,
             fullAddressAr,
+            latitude,
+            longitude,
+            deliveryRangeKm,
           } = Object.fromEntries(data);
+          const hasLatitude = String(latitude ?? '').trim() !== '';
+          const hasLongitude = String(longitude ?? '').trim() !== '';
+          if (hasLatitude !== hasLongitude) throw new ApiError(400, 'أدخل خط العرض وخط الطول معاً لتحديد موقع المتجر.');
           await api(
             store ? `/stores/${store.storeId}` : '/stores',
             json(store ? 'PATCH' : 'POST', {
@@ -312,6 +309,8 @@ function StoreForm({
               categoryId: Number(categoryId),
               areaId: Number(areaId),
               fullAddressAr,
+              ...(hasLatitude && { latitude: Number(latitude), longitude: Number(longitude) }),
+              ...(String(deliveryRangeKm ?? '').trim() && { deliveryRangeKm: Number(deliveryRangeKm) }),
             }),
           );
           setSaved(true);
@@ -384,6 +383,10 @@ function StoreForm({
           name="fullAddressAr"
           defaultValue={store?.fullAddressAr ?? store?.fullAddress ?? ''}
         />
+        <p>انسخ إحداثيات موقع المتجر الفعلي من Google Maps. يُحسب نطاق التوصيل من هذا الموقع إلى عنوان العميل.</p>
+        <Field label="خط العرض للمتجر" name="latitude" type="number" min={-90} max={90} step="0.00000001" defaultValue={String(store?.latitude ?? '')} required={false} />
+        <Field label="خط الطول للمتجر" name="longitude" type="number" min={-180} max={180} step="0.00000001" defaultValue={String(store?.longitude ?? '')} required={false} />
+        <Field label="نطاق التوصيل بالكيلومتر" name="deliveryRangeKm" type="number" min={0} max={999.99} step="0.01" defaultValue={String(store?.deliveryRangeKm ?? 10)} />
       </ActionForm>
       {saved && (
         <p className="owner-success" role="status">

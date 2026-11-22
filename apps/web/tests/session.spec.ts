@@ -36,6 +36,7 @@ for (const role of ['customer', 'store_owner', 'driver', 'admin']) {
           role,
           full_name: 'أحمد محمد',
           phone: '0591234567',
+          addressPromptedAt: role === 'customer' ? 'done' : null,
         };
       } else if (path === '/auth/refresh') {
         expect(route.request().postDataJSON()).toEqual({

@@ -1,6 +1,7 @@
 import { PaymentMethod } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
+  IsIn,
   ArrayMaxSize, ArrayUnique, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsString,
   Matches, Max, MaxLength, Min, ValidateBy, ValidateIf, ValidateNested,
 } from 'class-validator';
@@ -23,6 +24,27 @@ export class AddressDto {
 
   @IsString() @Matches(/\S/) @MaxLength(500)
   address: string;
+
+  @ValidateIf((_dto, value) => value !== undefined) @IsString() @Matches(/\S/) @MaxLength(120)
+  area?: string;
+
+  @ValidateIf((_dto, value) => value !== undefined) @IsIn(['APARTMENT', 'HOUSE', 'OFFICE'])
+  residenceType?: 'APARTMENT' | 'HOUSE' | 'OFFICE';
+
+  @ValidateIf((_dto, value) => value !== undefined) @IsString() @Matches(/\S/) @MaxLength(160)
+  building?: string;
+
+  @ValidateIf((_dto, value) => value !== undefined) @IsString() @MaxLength(40)
+  floor?: string;
+
+  @ValidateIf((_dto, value) => value !== undefined) @IsString() @Matches(/\S/) @MaxLength(160)
+  street?: string;
+
+  @ValidateIf((_dto, value) => value !== undefined) @IsString() @Matches(/^\+?[0-9]{8,15}$/)
+  phone?: string;
+
+  @ValidateIf((_dto, value) => value !== undefined) @IsString() @MaxLength(300)
+  directions?: string;
 
   @Coordinate(-90, 90, 'خط العرض')
   latitude: number;
@@ -67,16 +89,42 @@ export class CheckoutDto {
   cartVersion: number;
 }
 
+export class DriverLocationDto {
+  @Coordinate(-90, 90, 'خط العرض')
+  latitude: number;
+
+  @Coordinate(-180, 180, 'خط الطول')
+  longitude: number;
+}
+
+export class DeliveryCompanyDto {
+  @IsString() @Matches(/\S/) @MaxLength(160)
+  name: string;
+
+  @IsInt() @Min(1) @Max(2147483647)
+  managerId: number;
+}
+
+export class DriverCompanyDto {
+  @ValidateIf((_dto, value) => value !== null)
+  @IsInt() @Min(1) @Max(2147483647)
+  deliveryCompanyId: number | null;
+}
+
 export enum OrderAction {
   ACCEPT = 'accept',
   QUOTE = 'quote',
   APPROVE_QUOTE = 'approve_quote',
   REJECT = 'reject',
   CANCEL = 'cancel',
+  CONFIRM_RETURN = 'confirm_return',
   READY = 'ready',
   ASSIGN = 'assign',
   ACCEPT_ASSIGNMENT = 'accept_assignment',
   DECLINE_ASSIGNMENT = 'decline_assignment',
+  CLAIM_DELIVERY = 'claim_delivery',
+  COMPANY_ASSIGN = 'company_assign',
+  REROUTE_DELIVERY = 'reroute_delivery',
   PICK_UP = 'pick_up',
   DELIVER = 'deliver',
   REPORT_DELIVERY_ISSUE = 'report_delivery_issue',
@@ -102,11 +150,15 @@ export class OrderActionDto {
   @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(999999999999.99)
   total?: number;
 
-  @ValidateIf(dto => dto.driverId !== undefined || dto.action === OrderAction.ASSIGN)
+  @ValidateIf(dto => dto.driverId !== undefined || [OrderAction.ASSIGN, OrderAction.COMPANY_ASSIGN].includes(dto.action))
   @IsInt() @Min(1) @Max(2147483647)
   driverId?: number;
 
-  @ValidateIf(dto => dto.reason !== undefined || dto.action === OrderAction.REJECT || dto.action === OrderAction.CANCEL || dto.action === OrderAction.REPORT_DELIVERY_ISSUE || dto.action === OrderAction.RESET_DELIVERY_CODE)
+  @ValidateIf((_dto, value) => value !== undefined && value !== null)
+  @IsInt() @Min(1) @Max(2147483647)
+  deliveryCompanyId?: number | null;
+
+  @ValidateIf(dto => dto.reason !== undefined || [OrderAction.REJECT, OrderAction.CANCEL, OrderAction.CONFIRM_RETURN, OrderAction.REPORT_DELIVERY_ISSUE, OrderAction.RESET_DELIVERY_CODE, OrderAction.REROUTE_DELIVERY].includes(dto.action))
   @IsString() @Matches(/\S/) @MaxLength(500)
   reason?: string;
 }
