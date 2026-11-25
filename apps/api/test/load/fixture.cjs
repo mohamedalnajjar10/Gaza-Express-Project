@@ -56,9 +56,10 @@ async function profile() {
     await sample('catalog cache hit', () => cached.findAll({}));
     if (queries !== 0) throw new Error('Expected a cache hit without SQL');
     try {
-      await cached.toggleStatus(store.ownerId, store.storeId);
+      const nextAvailability = !store.isOpenNow;
+      await cached.toggleStatus(store.ownerId, store.storeId, nextAvailability);
       const refreshed = await cached.findAll({});
-      if (refreshed.data.find(row => row.storeId === store.storeId)?.isOpenNow !== !store.isOpenNow) throw new Error('Catalog invalidation failed');
+      if (refreshed.data.find(row => row.storeId === store.storeId)?.isOpenNow !== nextAvailability) throw new Error('Catalog invalidation failed');
       console.log(JSON.stringify({ label: 'catalog invalidation after write', passed: true }));
     } finally {
       await db.store.update({ where: { storeId: store.storeId }, data: { isOpenNow: store.isOpenNow } });

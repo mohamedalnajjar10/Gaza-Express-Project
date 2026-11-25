@@ -8,10 +8,12 @@ import { Empty, Result, Title } from '../../shared/ui/feedback';
 import { useResource } from '../../shared/hooks/use-resource';
 import { useIdentity } from '../../shared/auth/identity';
 import { usePolling } from '../../shared/hooks/use-polling';
+import { normalizeDigits } from '../../shared/lib/numbers';
 import { useOrderUpdates } from './use-order-updates';
-import { DriverLocationControl } from '../operations/driver-location';
-import { DriverAreaPicker } from '../operations/driver-availability';
+import { DriverLocationControl } from '../driver/driver-location';
+import { DriverAreaPicker } from '../driver/driver-availability';
 import './dispatch.css';
+import './payment.css';
 
 const driverSections = [
   { label: 'عروض التوصيل', statuses: ['READY'] },
@@ -19,32 +21,55 @@ const driverSections = [
   { label: 'سجل التوصيل', statuses: ['DELIVERED', 'CANCELLED', 'REJECTED'] },
 ];
 
+function paymentBadge(order: Order): { label: string; tone: string } | null {
+  if (order.offerOnly) return null;
+  if (order.paymentMethod !== 'BANK_TRANSFER') {
+    return order.payment?.status === 'PAID'
+      ? { label: 'نقدي · مدفوع', tone: 'is-paid' }
+      : { label: 'عند الاستلام', tone: 'is-due' };
+  }
+  const p = order.payment;
+  if (!p) return { label: 'بنك فلسطين · بانتظار الاعتماد', tone: 'is-due' };
+  if (p.status === 'PAID') return { label: 'بنك فلسطين · مدفوع', tone: 'is-paid' };
+  if (p.status === 'REFUND_REQUIRED') return { label: 'بنك فلسطين · بانتظار الاسترداد', tone: 'is-fraud' };
+  if (p.status === 'REFUNDED') return { label: 'بنك فلسطين · مسترد', tone: 'is-paid' };
+  if (p.receipt?.decision === 'suspend') return { label: 'بنك فلسطين · احتيال مؤكّد', tone: 'is-fraud' };
+  if (p.receipt?.reportReason && !p.receipt.decision) return { label: 'بنك فلسطين · بلاغ احتيال', tone: 'is-fraud' };
+  if (p.receipt?.riskLevel === 'HIGH') return { label: 'بنك فلسطين · اشتباه بالإيصال', tone: 'is-fraud' };
+  if (p.receipt) return { label: 'بنك فلسطين · بانتظار التحقق', tone: 'is-review' };
+  return { label: 'بنك فلسطين · بانتظار الإيصال', tone: 'is-due' };
+}
+
 function OrderList({ orders }: { orders: Order[] }) {
   return (
     <div className="stack">
-      {orders.map((order) => (
-        <Link
-          className={`surface padded list-row${order.openOffer?.nearby ? ' delivery-nearby' : ''}`}
-          to={`/orders/${order.id}`}
-          key={order.id}
-        >
-          <div>
-            <strong>طلب #{order.id}</strong>
-            <p>{order.storeName}</p>
-            {order.openOffer && <div className="delivery-offer-labels">
-              {order.openOffer.nearby && <span className="badge delivery-nearby-label">
-                {order.openOffer.pickupKm === null ? 'ضمن منطقة التوصيل' : 'طلب قريب منك'}
-              </span>}
-              {order.openOffer.pickupKm !== null && <small>{order.openOffer.pickupKm} كم إلى المتجر تقريبًا</small>}
-              {!order.openOffer.canClaim && <small>الأولوية للسائق الأقرب</small>}
-            </div>}
-          </div>
-          <span className="badge">
-            {orderLabels[order.status] || order.status}
-          </span>
-          <ArrowLeft className="order-row-arrow" size={18} aria-hidden="true" />
-        </Link>
-      ))}
+      {orders.map((order) => {
+        const pay = paymentBadge(order);
+        return (
+          <Link
+            className={`surface padded list-row${order.openOffer?.nearby ? ' delivery-nearby' : ''}`}
+            to={`/orders/${order.id}`}
+            key={order.id}
+          >
+            <div>
+              <strong>طلب #{order.id}</strong>
+              <p>{order.storeName}</p>
+              {pay && <span className={`payment-badge ${pay.tone}`}>{pay.label}</span>}
+              {order.openOffer && <div className="delivery-offer-labels">
+                {order.openOffer.nearby && <span className="badge delivery-nearby-label">
+                  {order.openOffer.pickupKm === null ? 'ضمن منطقة التوصيل' : 'طلب قريب منك'}
+                </span>}
+                {order.openOffer.pickupKm !== null && <small>{order.openOffer.pickupKm} كم إلى المتجر تقريبًا</small>}
+                {!order.openOffer.canClaim && <small>الأولوية للسائق الأقرب</small>}
+              </div>}
+            </div>
+            <span className="badge">
+              {orderLabels[order.status] || order.status}
+            </span>
+            <ArrowLeft className="order-row-arrow" size={18} aria-hidden="true" />
+          </Link>
+        );
+      })}
     </div>
   );
 }
@@ -70,10 +95,12 @@ export default function Orders() {
   );
   const isDriver = profile?.role === 'driver';
   const offers = useResource(signal => isDriver ? api<Order[]>('/drivers/me/offers', { signal }) : Promise.resolve([]), `independent-offers:${isDriver}`);
+  const reloadOrders = state.reload;
+  const reloadOffers = offers.reload;
   const refresh = useCallback(() => {
-    state.reload();
-    if (isDriver) offers.reload();
-  }, [isDriver, state.reload, offers.reload]);
+    reloadOrders();
+    if (isDriver) reloadOffers();
+  }, [isDriver, reloadOrders, reloadOffers]);
   const connected = useOrderUpdates(refresh, !before);
   usePolling(state.reload, 10_000, !before && !connected);
   usePolling(offers.reload, connected ? 30_000 : 8_000, isDriver);
@@ -145,24 +172,32 @@ export default function Orders() {
                   ) : null;
                 })
               ) : profile?.role === 'store_owner' ? (
-                <>
-                  <OrderList
-                    orders={result.orders.filter(
-                      (order) =>
-                        (status === 'all' || order.status === status) &&
-                        `${order.id} ${order.storeName}`.includes(query.trim()),
-                    )}
-                  />
-                  {!result.orders.some(
+                (() => {
+                  const normalizedQuery = normalizeDigits(query.trim()).toLowerCase();
+                  const filtered = result.orders.filter(
                     (order) =>
                       (status === 'all' || order.status === status) &&
-                      `${order.id} ${order.storeName}`.includes(query.trim()),
-                  ) && (
-                    <Empty title="لا توجد طلبات تطابق البحث">
-                      <p>جرّب رقمًا آخر أو اختر كل الحالات.</p>
-                    </Empty>
-                  )}
-                </>
+                      (!normalizedQuery ||
+                        normalizeDigits(`${order.id} ${order.storeName}`)
+                          .toLowerCase()
+                          .includes(normalizedQuery)),
+                  );
+                  return (
+                    <>
+                      {(normalizedQuery || status !== 'all') && (
+                        <p role="status">
+                          يعرض {filtered.length} من أصل {result.orders.length} طلب في هذه الصفحة.
+                        </p>
+                      )}
+                      <OrderList orders={filtered} />
+                      {!filtered.length && (
+                        <Empty title="لا توجد طلبات تطابق البحث">
+                          <p>جرّب رقمًا آخر أو اختر كل الحالات.</p>
+                        </Empty>
+                      )}
+                    </>
+                  );
+                })()
               ) : (
                 <OrderList orders={result.orders} />
               )}

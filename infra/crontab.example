@@ -1,0 +1,9 @@
+# Example production cron schedule (install in root/deploy user crontab, paths adjusted to repo root)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Daily encrypted MySQL + MinIO backup at 02:30 UTC
+30 2 * * * cd /opt/gaza-express && BACKUP_DIR=/var/backups/wasla bash infra/backup.sh >> /var/log/wasla-backup.log 2>&1
+
+# Daily retention prune (expired refresh_tokens, sms_jobs, otp_codes, old read notifications) at 03:15 UTC
+15 3 * * * cd /opt/gaza-express && docker compose --profile maintenance run --rm maintenance >> /var/log/wasla-maintenance.log 2>&1

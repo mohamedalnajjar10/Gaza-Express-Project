@@ -25,6 +25,11 @@ COPY --from=build --chown=node:node /app/prisma.config.ts ./
 CMD ["node", "node_modules/prisma/build/index.js", "migrate", "deploy"]
 
 FROM base AS runtime
+# All runtime processes start with node. Keep build-time package managers out of this image.
+USER root
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-* \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
+USER node
 COPY --from=production-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build --chown=node:node /app/dist ./dist

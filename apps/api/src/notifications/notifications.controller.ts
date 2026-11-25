@@ -1,5 +1,5 @@
 import type { AuthenticatedRequest } from '../common/authenticated-request';
-import { Body, ConflictException, Controller, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Query, Req, UseGuards } from '@nestjs/common';
 import { IsIn, IsString, Matches, MaxLength } from 'class-validator';
 import { PrismaService } from 'prisma/prisma.service';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -18,6 +18,9 @@ export class NotificationsController {
 
   @Get()
   async list(@Req() req: AuthenticatedRequest, @Query('before', new ParseIntPipe({ optional: true })) before?: number) {
+    if (before !== undefined && before < 1) {
+      throw new BadRequestException('before must be a positive integer');
+    }
     const rows = await this.db.notification.findMany({
       where: { userId: req.user.user_id, ...(before !== undefined ? { id: { lt: before } } : {}) },
       orderBy: { id: 'desc' }, take: 51,

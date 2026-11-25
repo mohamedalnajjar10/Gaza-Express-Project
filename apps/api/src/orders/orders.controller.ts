@@ -1,58 +1,60 @@
+import { AddressesService } from './addresses.service';
+import { CartService } from './cart.service';
 import type { AuthenticatedRequest } from '../common/authenticated-request';
 import { PageDto } from 'src/common/dto/page.dto';
 import {
-  Body, Controller, Delete, Get, Header, Headers, HttpCode, Param, ParseIntPipe,
+  BadRequestException, Body, Controller, Delete, Get, Header, Headers, HttpCode, Param, ParseIntPipe,
   Patch, Post, Put, Query, Req, Res, UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiBearerAuth, ApiHeader, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
-import { AddressDto, CheckoutDto, DeliveryCompanyDto, DriverCompanyDto, DriverLocationDto, OrderActionDto, ReplaceCartDto } from './orders.dto';
+import { AddressDto, CheckoutDto, DeliveryCompanyDto, DeliveryQuoteDto, DriverCompanyDto, DriverLocationDto, OrderActionDto, ReplaceCartDto, UpdateDeliveryCompanyDto } from './orders.dto';
 import { OrdersService } from './orders.service';
 import { DispatchService } from './dispatch.service';
-import { OrderUpdates } from './order-updates';
+import { OrderUpdates } from '../infrastructure/order-updates';
 
 @ApiTags('Order lifecycle')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
 @Controller()
 export class OrdersController {
-  constructor(private readonly service: OrdersService, private readonly dispatch: DispatchService, private readonly updates: OrderUpdates) {}
+  constructor(private readonly service: OrdersService, private readonly addressService: AddressesService, private readonly cartService: CartService, private readonly dispatch: DispatchService, private readonly updates: OrderUpdates) {}
 
   @Get('addresses')
   @Header('Cache-Control', 'private, no-store')
-  addresses(@Req() req: AuthenticatedRequest, @Query() page: PageDto) { return this.service.addresses(req.user, page); }
+  addresses(@Req() req: AuthenticatedRequest, @Query() page: PageDto) { return this.addressService.addresses(req.user, page); }
 
   @Patch('addresses/onboarding')
-  skipAddress(@Req() req: AuthenticatedRequest) { return this.service.skipAddressOnboarding(req.user); }
+  skipAddress(@Req() req: AuthenticatedRequest) { return this.addressService.skipAddressOnboarding(req.user); }
 
   @Put('addresses/default')
   saveDefaultAddress(@Req() req: AuthenticatedRequest, @Body() dto: AddressDto) {
-    return this.service.saveDefaultAddress(req.user, dto);
+    return this.addressService.saveDefaultAddress(req.user, dto);
   }
 
   @Post('addresses')
   createAddress(@Req() req: AuthenticatedRequest, @Body() dto: AddressDto) {
-    return this.service.createAddress(req.user, dto);
+    return this.addressService.createAddress(req.user, dto);
   }
 
   @Put('addresses/:id')
   updateAddress(@Req() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: AddressDto) {
-    return this.service.updateAddress(req.user, id, dto);
+    return this.addressService.updateAddress(req.user, id, dto);
   }
 
   @Delete('addresses/:id')
   @HttpCode(204)
   deleteAddress(@Req() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number) {
-    return this.service.deleteAddress(req.user, id);
+    return this.addressService.deleteAddress(req.user, id);
   }
 
   @Get('cart')
-  cart(@Req() req: AuthenticatedRequest) { return this.service.cart(req.user); }
+  cart(@Req() req: AuthenticatedRequest) { return this.cartService.cart(req.user); }
 
   @Put('cart')
   replaceCart(@Req() req: AuthenticatedRequest, @Body() dto: ReplaceCartDto) {
-    return this.service.replaceCart(req.user, dto);
+    return this.cartService.replaceCart(req.user, dto);
   }
 
   @Get('rewards')
@@ -67,12 +69,19 @@ export class OrdersController {
 
   @Get('orders')
   list(@Req() req: AuthenticatedRequest, @Query('before', new ParseIntPipe({ optional: true })) before?: number) {
+    if (before !== undefined && before < 1) throw new BadRequestException('Invalid before cursor');
     return this.service.list(req.user, before);
   }
 
   @Get('orders/updates')
   async orderUpdates(@Req() req: AuthenticatedRequest, @Res() res: Response) {
     this.updates.open(res, req.user, await this.dispatch.canSeeIndependentOffers(req.user));
+  }
+
+  @Get('orders/delivery-quote')
+  @Header('Cache-Control', 'private, no-store')
+  deliveryQuote(@Req() req: AuthenticatedRequest, @Query() query: DeliveryQuoteDto) {
+    return this.service.deliveryQuote(req.user, query);
   }
 
   @Get('orders/:id')
@@ -148,6 +157,11 @@ export class OrdersController {
   @Post('delivery-companies')
   createCompany(@Req() req: AuthenticatedRequest, @Body() dto: DeliveryCompanyDto) {
     return this.dispatch.createCompany(req.user, dto);
+  }
+
+  @Patch('delivery-companies/:id')
+  updateCompany(@Req() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: UpdateDeliveryCompanyDto) {
+    return this.dispatch.updateCompany(req.user, id, dto);
   }
 
   @Put('stores/:id/delivery-contracts/:companyId')

@@ -1,4 +1,4 @@
-import { Global, HttpException, HttpStatus, Injectable, Module, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
+import { Global, HttpException, HttpStatus, Injectable, Logger, Module, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { UserRole } from '@prisma/client';
 import type { Response } from 'express';
@@ -10,6 +10,7 @@ type Change = { users: number[]; independent: boolean };
 
 @Injectable()
 export class OrderUpdates implements OnModuleDestroy {
+  private readonly logger = new Logger(OrderUpdates.name);
   private readonly changes = new Subject<Change>();
   private readonly connections = new Map<number, number>();
   private readonly closeStreams = new Set<() => void>();
@@ -51,7 +52,14 @@ export class OrderUpdates implements OnModuleDestroy {
     const event = { users: [...new Set(recipients.filter((id): id is number => id != null))], independent };
     this.changes.next(event);
     if (this.publisher) {
-      void this.publisher.publish(this.channel, JSON.stringify({ ...event, origin: this.origin })).catch(() => undefined);
+      void this.publisher
+        .publish(this.channel, JSON.stringify({ ...event, origin: this.origin }))
+        .catch((error: unknown) => {
+          this.logger.warn({
+            event: 'order_updates_publish_failed',
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
     }
   }
 

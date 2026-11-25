@@ -16,10 +16,12 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
       - run: npm ci
+      - run: npm run lint
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium firefox webkit
       - run: npm run test:e2e
-      - run: docker build --tag wasla-web:ci .
+        env:
+          PLAYWRIGHT_CROSS_BROWSER: '1'
   verify:
     runs-on: ubuntu-latest
     defaults:
@@ -57,7 +59,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: apps/api/package-lock.json
+          cache-dependency-path: |
+            apps/api/package-lock.json
+            apps/web/package-lock.json
       - run: npm ci
       - run: npx prisma generate
       - run: npm run lint
@@ -71,10 +75,31 @@ jobs:
           npm run test:e2e -- --runInBand
       - run: npm run test:redis
       - run: npm audit --omit=dev --audit-level=high
-      - name: Build the deployable Docker image
+      - name: Install the browser for Compose smoke tests
         run: |
-          docker build --tag wasla-backend:ci .
-          docker build --target migrator --tag wasla-migrator:ci .
-      - name: Smoke test migrations, readiness routing and media through Docker
+          npm ci --prefix apps/web
+          npm --prefix apps/web exec -- playwright install --with-deps chromium
+        working-directory: .
+      - name: Verify migrations, media and the real browser journey through Docker
         run: bash infra/compose-smoke.sh
         working-directory: .
+  container-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build API and Web production images
+        run: |
+          docker build -t wasla-api:ci ./apps/api
+          docker build -t wasla-web:ci ./apps/web
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+      - name: Scan container images for fixable HIGH/CRITICAL CVEs
+        run: |
+          trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 wasla-api:ci
+          trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 wasla-web:ci

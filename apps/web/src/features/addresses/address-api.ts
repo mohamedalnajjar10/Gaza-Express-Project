@@ -20,6 +20,7 @@ export function getAddresses(signal?: AbortSignal) {
 }
 
 export type AddressInput = Omit<Address, 'id' | 'latitude' | 'longitude'> & { latitude: number; longitude: number };
-export function saveAddress(data: AddressInput, id?: number) {
-  return api<Address>(id ? `/addresses/${id}` : '/addresses/default', json('PUT', data));
+export function saveAddress(data: AddressInput, id?: number, createNew = false) {
+  if (id) return api<Address>(`/addresses/${id}`, json('PUT', data));
+  return api<Address>(createNew ? '/addresses' : '/addresses/default', json(createNew ? 'POST' : 'PUT', data));
 }

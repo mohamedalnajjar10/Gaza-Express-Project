@@ -110,7 +110,7 @@ describe('AuthService', () => {
 
     authService = module.get<AuthService>(AuthService);
     jest.clearAllMocks();
-    mockPrismaService.$transaction.mockImplementation(fn => fn(mockPrismaService));
+    mockPrismaService.$transaction.mockImplementation(fn => Array.isArray(fn) ? Promise.all(fn) : fn(mockPrismaService));
     mockPrismaService.refreshToken.updateMany.mockResolvedValue({ count: 1 });
     mockPrismaService.user.findUnique.mockResolvedValue(mockUser);
 
@@ -131,9 +131,9 @@ describe('AuthService', () => {
 
   // register
   describe('register()', () => {
-    it('requests verification without persisting registration credentials', async () => {
-      const response = await authService.register({ phone: mockUser.phone });
-      expect(mockOtpService.sendSignup).toHaveBeenCalledWith(mockUser.phone, true);
+    it('binds the selected role to the verification request', async () => {
+      const response = await authService.register({ phone: mockUser.phone, role: 'driver' });
+      expect(mockOtpService.sendSignup).toHaveBeenCalledWith(mockUser.phone, true, 'driver');
       expect(response).toEqual({ message: 'If verification is available, a code will be sent' });
       expect(mockUserService.createUserForAuth).not.toHaveBeenCalled();
     });
@@ -204,7 +204,7 @@ describe('AuthService', () => {
   describe('verifyOtp()', () => {
     const dto = { phone: mockUser.phone, code: '123456', password: 'Verified!Pass42', full_name: 'Verified user' };
     it('only updates credentials via the successful challenge transaction', async () => {
-      mockOtpService.verifyOtp.mockImplementation((_phone, _code, _purpose, run) => run(mockPrismaService, mockUser.user_id));
+      mockOtpService.verifyOtp.mockImplementation((_phone, _code, _purpose, run) => run(mockPrismaService, mockUser.user_id, null));
       mockPrismaService.user.update.mockResolvedValue(mockUser);
       await authService.verifyOtp(dto);
       expect(mockPrismaService.user.update).toHaveBeenCalledWith({
@@ -245,13 +245,40 @@ describe('AuthService', () => {
       );
     });
 
-    it('[UNAUTHORIZED] should throw if token revoked', async () => {
+    it('[UNAUTHORIZED] should throw if token revoked and revoke active sessions', async () => {
       mockPrismaService.refreshToken.findUnique.mockResolvedValue({
         ...mockRefreshTokenRecord,
         revoked_at: new Date(),
       });
 
       await expect(authService.refreshToken('revoked')).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockPrismaService.user.update).toHaveBeenCalledWith({
+        where: { user_id: mockUser.user_id },
+        data: { sessionVersion: { increment: 1 } },
+      });
+      expect(mockPrismaService.refreshToken.updateMany).toHaveBeenCalledWith({
+        where: { user_id: mockUser.user_id, revoked_at: null },
+        data: { revoked_at: expect.any(Date) },
+      });
+    });
+
+    it('[UNAUTHORIZED] should throw 401 without revoking winner on in-flight concurrent refresh loss', async () => {
+      mockPrismaService.refreshToken.findUnique.mockResolvedValue(mockRefreshTokenRecord);
+      mockPrismaService.refreshToken.updateMany.mockResolvedValueOnce({ count: 0 });
+
+      await expect(authService.refreshToken('concurrent-loser')).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockPrismaService.user.update).not.toHaveBeenCalled();
+    });
+
+    it('[UNAUTHORIZED] should throw 401 if account is disabled during refresh', async () => {
+      mockPrismaService.refreshToken.findUnique.mockResolvedValue(mockRefreshTokenRecord);
+      mockPrismaService.user.findUnique.mockResolvedValue({ ...mockUser, is_active: false });
+
+      await expect(authService.refreshToken('valid.refresh.token')).rejects.toThrow(
         UnauthorizedException,
       );
     });
@@ -270,9 +297,9 @@ describe('AuthService', () => {
 
   // logout
   describe('logout()', () => {
-    it('[SUCCESS] should revoke refresh token', async () => {
+    it('[SUCCESS] should revoke refresh token and bump sessionVersion', async () => {
       mockPrismaService.refreshToken.updateMany.mockResolvedValue({ count: 1 });
-    mockPrismaService.user.findUnique.mockResolvedValue(mockUser);
+      mockPrismaService.user.findUnique.mockResolvedValue(mockUser);
 
       const result = await authService.logout(1, 'valid.token');
 
@@ -281,14 +308,19 @@ describe('AuthService', () => {
         where: { user_id: 1, token: createHash('sha256').update('valid.token').digest('hex') },
         data: { revoked_at: expect.any(Date) },
       });
+      expect(mockPrismaService.user.update).toHaveBeenCalledWith({
+        where: { user_id: 1 },
+        data: { sessionVersion: { increment: 1 } },
+      });
     });
 
-    it('[IDEMPOTENT] should not throw if token not found', async () => {
+    it('[IDEMPOTENT] should not throw or bump sessionVersion if token not found', async () => {
       mockPrismaService.refreshToken.updateMany.mockResolvedValue({ count: 0 });
 
       await expect(
         authService.logout(1, 'ghost.token'),
       ).resolves.toBeDefined();
+      expect(mockPrismaService.user.update).not.toHaveBeenCalled();
     });
   });
 

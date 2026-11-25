@@ -1,3 +1,5 @@
+import { payoutConfig, resolveCommissionBps } from './payout-config';
+import { merchantSummary, platformSummary } from './finance-reports';
 import { recordNotifications } from '../notifications/record-notifications';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -5,19 +7,27 @@ import { CustomerOrder, PaymentMethod, Prisma, UserRole } from '@prisma/client';
 import { createHmac, randomUUID } from 'crypto';
 import { PrismaService } from 'prisma/prisma.service';
 import { DriverAvailabilityDto } from './finance.dto';
-import { OrderUpdates } from '../orders/order-updates';
+import { OrderUpdates } from '../infrastructure/order-updates';
 
 type Actor = { user_id: number; role: UserRole };
 type Tx = Prisma.TransactionClient;
+
+function merchantReceiptReport(report: Prisma.JsonValue) {
+  if (!report || typeof report !== 'object' || Array.isArray(report)) return null;
+  const checks = Array.isArray(report.checks) ? report.checks : [];
+  return {
+    checkedAt: report.checkedAt, verdict: report.verdict, riskScore: report.riskScore,
+    riskLevel: report.riskLevel, summaryAr: report.summaryAr,
+    checks: checks.flatMap(check => check && typeof check === 'object' && !Array.isArray(check)
+      ? [{ code: check.code, labelAr: check.labelAr, status: check.status }] : []),
+  };
+}
 
 @Injectable()
 export class FinanceService {
   constructor(private readonly db: PrismaService, private readonly config: ConfigService, private readonly updates: OrderUpdates) {}
 
   assertEnabled(method: PaymentMethod) {
-    if (method === 'BANK_TRANSFER' && !['BANK_TRANSFER_INSTRUCTIONS', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN'].every(key => this.config.get(key))) {
-      throw new ConflictException('Bank transfer is not configured');
-    }
     if (method === 'ELECTRONIC' && !this.sandboxEnabled()) throw new ConflictException('Electronic payment is not configured');
   }
 
@@ -79,20 +89,43 @@ export class FinanceService {
     return driver;
   }
 
-  async createPayment(tx: Tx, order: CustomerOrder, amount: Prisma.Decimal) {
-    const bps = Number(this.config.get('PLATFORM_COMMISSION_BPS', '0'));
-    const driverShare = new Prisma.Decimal(this.config.get('DRIVER_FEE_ILS', '0'));
-    if (!Number.isInteger(bps) || bps < 0 || bps > 10000 || !driverShare.isFinite() || driverShare.lt(0) || driverShare.decimalPlaces() > 2) {
+  async createPayment(tx: Tx, order: CustomerOrder, amount: Prisma.Decimal, options?: { deliveryCompanyId?: number | null }) {
+    const cfg = payoutConfig(this.config);
+    const store = await tx.store.findUniqueOrThrow({
+      where: { storeId: order.storeId },
+      select: { bankTransferPhone: true, planTier: true, commissionBps: true, storeCategory: { select: { defaultCommissionBps: true } } },
+    });
+    const commissionBpsApplied = resolveCommissionBps(store, cfg);
+    if (!Number.isInteger(commissionBpsApplied) || commissionBpsApplied < 0 || commissionBpsApplied > 10000) {
       throw new ConflictException('Invalid payout configuration');
     }
-    const platformShare = amount.times(bps).div(10000).toDecimalPlaces(2);
-    const storeShare = amount.minus(platformShare).minus(driverShare);
-    if (storeShare.lt(0)) throw new ConflictException('Payouts exceed order total');
-    return tx.payment.create({ data: {
-      orderId: order.id, amount, currency: order.currency, method: order.paymentMethod,
-      bankCode: order.paymentMethod === 'BANK_TRANSFER' ? randomUUID() : null,
-      driverShare, platformShare, storeShare,
-    } });
+    const deliveryFee = new Prisma.Decimal(order.deliveryFee ?? 0).toDecimalPlaces(2);
+    const itemsSubtotal = Prisma.Decimal.max(0, amount.minus(deliveryFee));
+    const orderCommission = itemsSubtotal.times(commissionBpsApplied).div(10000).toDecimalPlaces(2);
+    const resolvedCompanyId = options?.deliveryCompanyId !== undefined ? options.deliveryCompanyId : order.deliveryCompanyId;
+    const company = resolvedCompanyId
+      ? await tx.deliveryCompany.findUnique({ where: { id: resolvedCompanyId }, select: { feePerOrder: true } })
+      : null;
+    const companyFeeApplied = company ? new Prisma.Decimal(company.feePerOrder).toDecimalPlaces(2) : new Prisma.Decimal(0);
+    const deliveryMargin = deliveryFee.gt(0)
+      ? deliveryFee.times(cfg.deliveryCutBps).div(10000).toDecimalPlaces(2)
+      : new Prisma.Decimal(0);
+    const driverShare = deliveryFee.gt(0) ? deliveryFee.minus(deliveryMargin).toDecimalPlaces(2) : cfg.defaultDriverFee;
+    const platformShare = orderCommission.plus(deliveryMargin).plus(companyFeeApplied).toDecimalPlaces(2);
+    const storeShare = amount.minus(platformShare).minus(driverShare).toDecimalPlaces(2);
+    if (storeShare.lt(0)) {
+      throw new ConflictException('Order total is too small to cover platform commission and driver delivery fee');
+    }
+    const recipientPhone = order.paymentMethod === 'BANK_TRANSFER' ? store.bankTransferPhone || cfg.platformBankPhone : null;
+    return tx.payment.create({
+      data: {
+        recipientPhone,
+        storeCollected: Boolean(recipientPhone && recipientPhone !== cfg.platformBankPhone),
+        orderId: order.id, amount, currency: order.currency, method: order.paymentMethod,
+        bankCode: order.paymentMethod === 'BANK_TRANSFER' ? randomUUID() : null,
+        commissionBpsApplied, deliveryFee, companyFeeApplied, driverShare, platformShare, storeShare,
+      },
+    });
   }
 
   async assertReady(tx: Tx, order: CustomerOrder) {
@@ -125,15 +158,78 @@ export class FinanceService {
   }
 
   async status(actor: Actor, id: number) {
-    const order = await this.db.customerOrder.findFirst({ where: { id, ...(actor.role === 'admin' ? {} : { customerId: actor.user_id }) }, include: { payment: { include: { entries: { orderBy: { id: 'asc' } } } } } });
+    const order = await this.db.customerOrder.findFirst({
+      where: {
+        id,
+        ...(actor.role === 'admin'
+          ? {}
+          : actor.role === 'store_owner'
+            ? { store: { ownerId: actor.user_id }, paymentMethod: 'BANK_TRANSFER' as const }
+            : { customerId: actor.user_id }),
+      },
+      include: {
+        payment: {
+          include: {
+            entries: { orderBy: { id: 'asc' } },
+            receipt: {
+              select: {
+                submittedAt: true,
+                transferReference: true,
+                senderPhone: true,
+                verificationStatus: true,
+                riskLevel: true,
+                riskScore: true,
+                forensicReport: true,
+                reportReason: true,
+                reportedAt: true,
+                decision: true,
+                reviewedAt: true,
+                reviewNote: true,
+              },
+            },
+          },
+        },
+      },
+    });
     if (!order?.payment) throw new NotFoundException('Payment not found');
     const p = order.payment;
     if (actor.role === 'admin') return p;
     return {
-      method: p.method, status: p.status, amount: p.amount, currency: p.currency, collectedAt: p.collectedAt,
+      recipientPhone: p.recipientPhone,
+      storeCollected: p.storeCollected,
+      receipt: p.receipt && {
+        submittedAt: p.receipt.submittedAt,
+        transferReference: p.receipt.transferReference,
+        senderPhone: p.receipt.senderPhone,
+        verificationStatus: p.receipt.verificationStatus,
+        riskLevel: p.receipt.riskLevel,
+        decision: p.receipt.decision,
+        reportReason: p.receipt.reportReason,
+        reviewNote: p.receipt.reviewNote,
+        ...(actor.role === 'store_owner' && {
+          riskScore: p.receipt.riskScore,
+          forensicReport: merchantReceiptReport(p.receipt.forensicReport),
+          reportedAt: p.receipt.reportedAt,
+          reviewedAt: p.receipt.reviewedAt,
+        }),
+      },
+      method: p.method,
+      status: p.status,
+      amount: p.amount,
+      currency: p.currency,
+      collectedAt: p.collectedAt,
+      ...(actor.role === 'store_owner' && {
+        commissionBpsApplied: p.commissionBpsApplied,
+        deliveryFee: p.deliveryFee,
+        companyFeeApplied: p.companyFeeApplied,
+        storeShare: p.storeShare,
+        driverShare: p.driverShare,
+        platformShare: p.platformShare,
+      }),
       ...(p.method === 'BANK_TRANSFER' && p.status === 'DUE' ? {
-        bankInstructions: this.config.get('BANK_TRANSFER_INSTRUCTIONS'),
-        whatsappText: `WASLA ${p.bankCode}`, whatsappReceived: !!p.whatsappReceivedAt,
+        bankInstructions: p.recipientPhone ? undefined : this.config.get('BANK_TRANSFER_INSTRUCTIONS'),
+        whatsappText: `WASLA ${p.bankCode}`,
+        whatsappReceived: !!p.whatsappReceivedAt,
       } : {}),
     };
   }
@@ -147,30 +243,45 @@ export class FinanceService {
   }
 
   async reconcileBank(actor: Actor, id: number, amount: number, currency: string, reference: string) {
-    this.admin(actor);
-    return this.confirmIncoming(id, 'BANK_TRANSFER', amount, currency, reference, actor.user_id);
+    if (!['admin', 'store_owner'].includes(actor.role)) throw new ForbiddenException();
+    return this.confirmIncoming(id, 'BANK_TRANSFER', amount, currency, reference, actor.user_id, actor.role);
   }
 
-  async confirmIncoming(id: number, method: 'BANK_TRANSFER' | 'ELECTRONIC', amount: number, currency: string, reference: string, actorId: number) {
+  async confirmIncoming(id: number, method: 'BANK_TRANSFER' | 'ELECTRONIC', amount: number, currency: string, reference: string, actorId: number, role?: UserRole) {
     try {
       const result = await this.db.$transaction(async tx => {
         await tx.$queryRaw`SELECT id FROM customer_orders WHERE id = ${id} FOR UPDATE`;
-        const payment = await tx.payment.findUnique({ where: { orderId: id } });
+        const payment = await tx.payment.findUnique({
+          where: { orderId: id },
+          include: {
+            receipt: { select: { reportReason: true, decision: true, verificationStatus: true } },
+            order: { select: { storeId: true, store: { select: { ownerId: true } } } },
+          },
+        });
         if (!payment || payment.method !== method) throw new NotFoundException('Payment not found');
-        if (method === 'BANK_TRANSFER' && !payment.whatsappReceivedAt) throw new ConflictException('WhatsApp notification has not been received');
+        if (method === 'BANK_TRANSFER') {
+          if (role !== 'admin' && !(role === 'store_owner' && payment.storeCollected && payment.order.store.ownerId === actorId)) throw new ForbiddenException();
+          if (!payment.receipt || payment.receipt.decision === 'suspend' || payment.receipt.verificationStatus === 'FRAUD_CONFIRMED' || (payment.receipt.reportReason && payment.receipt.decision !== 'dismiss')) throw new ConflictException('An undisputed receipt is required');
+          if (payment.receipt.verificationStatus === 'FLAGGED_SUSPICIOUS' && payment.receipt.decision !== 'dismiss') {
+            throw new ConflictException('A flagged suspicious receipt requires admin review first');
+          }
+        }
         if (!payment.amount.eq(amount) || payment.currency !== currency) throw new BadRequestException('Bank amount or currency does not match');
         const ref = `${method}:${reference}`;
         if (payment.bankReference === ref) return { status: payment.status, change: null };
         if (!['DUE', 'VOID'].includes(payment.status)) throw new ConflictException('Payment already processed');
         const status = payment.status === 'VOID' ? 'REFUND_REQUIRED' : 'PAID';
         await tx.payment.update({ where: { orderId: id }, data: { status, bankReference: ref, collectedAt: new Date(), collectedBy: actorId || null } });
+        if (method === 'BANK_TRANSFER' && status === 'PAID') {
+          await tx.bankReceipt.updateMany({ where: { orderId: id }, data: { verificationStatus: 'VERIFIED' } });
+        }
         const opened = status === 'PAID'
           ? await tx.customerOrder.updateMany({
             where: { id, status: 'ACCEPTED', dispatchOpenedAt: null },
             data: { dispatchOpenedAt: new Date() },
           })
           : null;
-        await this.entry(tx, id, 'COLLECTION', method === 'BANK_TRANSFER' ? 'platform:bank' : 'provider:clearing', 'order:clearing', payment.amount, actorId);
+        await this.entry(tx, id, 'COLLECTION', method === 'BANK_TRANSFER' ? (payment.storeCollected ? `store:bank:${payment.order.storeId}` : 'platform:bank') : 'provider:clearing', 'order:clearing', payment.amount, actorId);
         const order = await tx.customerOrder.findUniqueOrThrow({ where: { id }, select: { customerId: true, store: { select: { ownerId: true } }, deliveryCompany: { select: { managerId: true } } } });
         const users = [order.customerId, order.store.ownerId, status === 'PAID' ? order.deliveryCompany?.managerId : null];
         await recordNotifications(tx, users, `payment:${id}:confirmed`, `payment.${status.toLowerCase()}`, id);
@@ -191,14 +302,14 @@ export class FinanceService {
         await tx.$queryRaw`SELECT id FROM customer_orders WHERE id = ${id} FOR UPDATE`;
         const p = await tx.payment.findUnique({ where: { orderId: id }, include: { order: true } });
         if (!p || p.order.status !== 'DELIVERED' || p.status !== 'PAID') throw new ConflictException('Delivered and paid order required');
-        if (kind === 'cash_handover' && (p.method !== 'CASH' || !p.collectedBy)) throw new ConflictException('No cash custody to settle');
-        if (kind !== 'cash_handover' && p.method === 'CASH' && !p.cashHandedOverAt) throw new ConflictException('Cash handover required first');
+        if (kind === 'cash_handover' && ((p.method !== 'CASH' && !p.storeCollected) || !p.collectedBy)) throw new ConflictException('No cash custody to settle');
+        if (kind !== 'cash_handover' && (p.method === 'CASH' || p.storeCollected) && !p.cashHandedOverAt) throw new ConflictException('Cash handover required first');
         const previous = await tx.paymentEntry.findUnique({ where: { orderId_kind: { orderId: id, kind } } });
         if (previous?.reference === reference) return previous;
         if (previous) throw new ConflictException('Settlement already recorded');
         if (kind === 'cash_handover') {
           await tx.payment.update({ where: { orderId: id }, data: { cashHandedOverAt: new Date(), cashHandedOverBy: actor.user_id } });
-          return this.entry(tx, id, kind, 'platform:cash', `cash:driver:${p.collectedBy}`, p.amount, actor.user_id, reference);
+          return this.entry(tx, id, kind, p.storeCollected ? 'platform:bank' : 'platform:cash', p.storeCollected ? `store:bank:${p.order.storeId}` : `cash:driver:${p.collectedBy}`, p.amount, actor.user_id, reference);
         }
         return kind === 'store_payout'
           ? this.entry(tx, id, kind, `store:payable:${p.order.storeId}`, 'platform:bank', p.storeShare, actor.user_id, reference)
@@ -238,6 +349,14 @@ export class FinanceService {
 
   private entry(tx: Tx, orderId: number, kind: string, debit: string, credit: string, amount: Prisma.Decimal, actorId: number, reference?: string) {
     return tx.paymentEntry.create({ data: { orderId, kind, debit, credit, amount, actorId, reference } });
+  }
+
+  merchantSummary(actor: Actor) {
+    return merchantSummary(this.db, this.config, actor);
+  }
+
+  platformSummary(actor: Actor) {
+    return platformSummary(this.db, this.config, actor);
   }
 
   private admin(actor: Actor) {

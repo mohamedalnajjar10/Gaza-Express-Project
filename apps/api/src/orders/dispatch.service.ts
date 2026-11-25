@@ -1,21 +1,11 @@
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, UserRole } from '@prisma/client';
 import { PrismaService } from 'prisma/prisma.service';
-import { DeliveryCompanyDto, DriverLocationDto } from './orders.dto';
+import { distanceKm } from './delivery-pricing';
+import { DeliveryCompanyDto, DriverLocationDto, UpdateDeliveryCompanyDto } from './orders.dto';
 
 type Actor = { user_id: number; role: UserRole };
 type Queryable = Pick<Prisma.TransactionClient, '$queryRaw'>;
-type Offer = {
-  id: number;
-  storeId: number;
-  storeName: string;
-  status: string;
-  version: number;
-  createdAt: Date;
-  pickupKm: number | null;
-  nearby: number | bigint | boolean | null;
-  canClaim: number | bigint | boolean;
-};
 
 const locationLifetimeMs = 2 * 60_000;
 const priorityMs = 45_000;
@@ -58,43 +48,136 @@ export class DispatchService {
     if (actor.role !== 'driver') throw new ForbiddenException();
     const now = new Date();
     const stale = new Date(now.getTime() - locationLifetimeMs);
-    const fresh = Prisma.sql`(d.locationUpdatedAt IS NOT NULL AND d.locationUpdatedAt >= ${stale})`;
-    const { pickup, score } = distances(Prisma.sql`d.latitude`, Prisma.sql`d.longitude`);
-    const closest = distances(Prisma.sql`candidate.latitude`, Prisma.sql`candidate.longitude`).score;
-    const rows = await db.$queryRaw<Offer[]>`
-      SELECT o.id, o.storeId, COALESCE(s.store_name_ar, o.storeName) AS storeName, o.status, o.version, o.createdAt,
-        CASE WHEN ${fresh} THEN ROUND(${pickup}, 1) END AS pickupKm,
-        CASE WHEN ${fresh} THEN (${score} <= 3) ELSE d.dispatchAreaId = s.area_id END AS nearby,
-        CASE WHEN o.dispatchOpenedAt <= ${new Date(now.getTime() - priorityMs)}
-          OR s.latitude IS NULL OR s.longitude IS NULL THEN 1
-          ELSE COALESCE(d.userId = (
-            SELECT candidate.userId FROM driver_profiles candidate
-            JOIN users u ON u.user_id = candidate.userId
-            LEFT JOIN customer_orders busy ON busy.activeDriverId = candidate.userId
-            WHERE candidate.deliveryCompanyId IS NULL AND candidate.approved = TRUE AND candidate.available = TRUE
-              AND candidate.locationUpdatedAt >= ${stale}
-              AND u.role = 'driver' AND u.is_active = TRUE AND u.is_verified = TRUE AND busy.id IS NULL
-            ORDER BY ${closest}, candidate.userId LIMIT 1
-          ), NOT ${fresh})
-        END AS canClaim
-      FROM customer_orders o
-      JOIN stores s ON s.store_id = o.storeId
-      JOIN driver_profiles d ON d.userId = ${actor.user_id}
+    const priorityCutoff = new Date(now.getTime() - priorityMs);
+
+    const [caller] = await db.$queryRaw<{
+      userId: number;
+      latitude: Prisma.Decimal | null;
+      longitude: Prisma.Decimal | null;
+      locationUpdatedAt: Date | null;
+      dispatchAreaId: number | null;
+    }[]>`
+      SELECT d.userId, d.latitude, d.longitude, d.locationUpdatedAt, d.dispatchAreaId
+      FROM driver_profiles d
       JOIN users u ON u.user_id = d.userId
       LEFT JOIN customer_orders active ON active.activeDriverId = d.userId
-      WHERE o.deliveryCompanyId IS NULL AND o.driverId IS NULL AND o.status IN ('ACCEPTED', 'READY')
-        AND o.dispatchOpenedAt IS NOT NULL AND (o.offerExpiresAt IS NULL OR o.offerExpiresAt <= ${now})
+      WHERE d.userId = ${actor.user_id}
         AND d.deliveryCompanyId IS NULL AND d.approved = TRUE AND d.available = TRUE
         AND u.role = 'driver' AND u.is_active = TRUE AND u.is_verified = TRUE
-        AND (${fresh} OR d.dispatchAreaId = s.area_id) AND active.id IS NULL
-        ${id === undefined ? Prisma.empty : Prisma.sql`AND o.id = ${id}`}
-      ORDER BY canClaim DESC, (s.latitude IS NULL OR s.longitude IS NULL), CASE WHEN ${fresh} THEN ${score} END, o.id DESC
-      LIMIT 50`;
+        AND active.id IS NULL
+      LIMIT 1`;
+    if (!caller) return [];
 
-    return rows.map(({ pickupKm, nearby, canClaim, ...order }) => ({
-      ...order, offerOnly: true as const,
-      openOffer: { pickupKm: pickupKm === null ? null : Number(pickupKm), nearby: Boolean(nearby), canClaim: Boolean(canClaim) },
-    }));
+    const callerFresh = Boolean(
+      caller.locationUpdatedAt && caller.locationUpdatedAt >= stale
+      && caller.latitude !== null && caller.longitude !== null,
+    );
+    if (!callerFresh && caller.dispatchAreaId === null) return [];
+    const callerLat = caller.latitude !== null ? Number(caller.latitude) : null;
+    const callerLng = caller.longitude !== null ? Number(caller.longitude) : null;
+
+    type CandidateOrderRow = {
+      id: number;
+      storeId: number;
+      storeName: string;
+      status: string;
+      version: number;
+      createdAt: Date;
+      dispatchOpenedAt: Date;
+      storeLat: number | null;
+      storeLng: number | null;
+      dropoffLat: number | null;
+      dropoffLng: number | null;
+      areaId: number;
+    };
+
+    const { score: callerSqlScore } = callerFresh
+      ? distances(Prisma.sql`${callerLat}`, Prisma.sql`${callerLng}`)
+      : { score: Prisma.sql`0` };
+
+    const orders = await db.$queryRaw<CandidateOrderRow[]>`
+      SELECT o.id, o.storeId, COALESCE(s.store_name_ar, o.storeName) AS storeName, o.status, o.version, o.createdAt,
+        o.dispatchOpenedAt,
+        CAST(s.latitude AS DOUBLE) AS storeLat,
+        CAST(s.longitude AS DOUBLE) AS storeLng,
+        CAST(JSON_VALUE(o.addressSnapshot, '$.latitude' RETURNING DECIMAL(10,8)) AS DOUBLE) AS dropoffLat,
+        CAST(JSON_VALUE(o.addressSnapshot, '$.longitude' RETURNING DECIMAL(11,8)) AS DOUBLE) AS dropoffLng,
+        s.area_id AS areaId
+      FROM customer_orders o
+      JOIN stores s ON s.store_id = o.storeId
+      WHERE o.deliveryCompanyId IS NULL AND o.driverId IS NULL AND o.status IN ('ACCEPTED', 'READY')
+        AND o.dispatchOpenedAt IS NOT NULL AND (o.offerExpiresAt IS NULL OR o.offerExpiresAt <= ${now})
+        ${callerFresh ? Prisma.empty : Prisma.sql`AND s.area_id = ${caller.dispatchAreaId}`}
+        ${id === undefined ? Prisma.empty : Prisma.sql`AND o.id = ${id}`}
+      ORDER BY (s.latitude IS NULL OR s.longitude IS NULL), ${callerFresh ? callerSqlScore : Prisma.sql`o.id DESC`}, o.id DESC
+      LIMIT ${id === undefined ? 200 : 1}`;
+
+    if (!orders.length) return [];
+
+    const needsPriorityCheck = orders.some(
+      order => order.dispatchOpenedAt > priorityCutoff && order.storeLat !== null && order.storeLng !== null,
+    );
+    const freshDrivers = needsPriorityCheck
+      ? await db.$queryRaw<{ userId: number; latitude: Prisma.Decimal; longitude: Prisma.Decimal }[]>`
+          SELECT candidate.userId, candidate.latitude, candidate.longitude
+          FROM driver_profiles candidate
+          JOIN users u ON u.user_id = candidate.userId
+          WHERE candidate.deliveryCompanyId IS NULL AND candidate.approved = TRUE AND candidate.available = TRUE
+            AND candidate.locationUpdatedAt >= ${stale}
+            AND candidate.latitude IS NOT NULL AND candidate.longitude IS NOT NULL
+            AND u.role = 'driver' AND u.is_active = TRUE AND u.is_verified = TRUE
+            AND NOT EXISTS (SELECT 1 FROM customer_orders busy WHERE busy.activeDriverId = candidate.userId)`
+      : [];
+
+    const driverScore = (lat: number, lng: number, order: CandidateOrderRow) => {
+      const pickup = distanceKm(lat, lng, order.storeLat!, order.storeLng!);
+      const dropoff = order.dropoffLat !== null && order.dropoffLng !== null
+        ? distanceKm(lat, lng, order.dropoffLat, order.dropoffLng)
+        : pickup;
+      return { pickup, score: 0.7 * pickup + 0.3 * dropoff };
+    };
+
+    const scored = orders.map(order => {
+      const hasStoreCoords = order.storeLat !== null && order.storeLng !== null;
+      const callerMetrics = callerFresh && hasStoreCoords
+        ? driverScore(callerLat!, callerLng!, order)
+        : null;
+      const pickupKm = callerMetrics ? Number(callerMetrics.pickup.toFixed(1)) : null;
+      const nearby = callerMetrics
+        ? callerMetrics.score <= 3
+        : caller.dispatchAreaId === order.areaId;
+
+      let canClaim = true;
+      if (order.dispatchOpenedAt > priorityCutoff && hasStoreCoords && freshDrivers.length > 0) {
+        if (!callerMetrics) {
+          canClaim = false;
+        } else {
+          canClaim = !freshDrivers.some(candidate => {
+            if (candidate.userId === actor.user_id) return false;
+            const candidateScore = driverScore(Number(candidate.latitude), Number(candidate.longitude), order).score;
+            return candidateScore < callerMetrics.score
+              || (candidateScore === callerMetrics.score && candidate.userId < actor.user_id);
+          });
+        }
+      }
+
+      return {
+        order: {
+          id: order.id,
+          storeId: order.storeId,
+          storeName: order.storeName,
+          status: order.status,
+          version: order.version,
+          createdAt: order.createdAt,
+          offerOnly: true as const,
+          openOffer: { pickupKm, nearby, canClaim },
+        },
+        canClaim,
+      };
+    });
+
+    scored.sort((a, b) => Number(b.canClaim) - Number(a.canClaim));
+    return scored.slice(0, 50).map(entry => entry.order);
   }
 
   async updateLocation(actor: Actor, point?: DriverLocationDto) {
@@ -200,7 +283,7 @@ export class DispatchService {
   listCompanies(actor: Actor) {
     this.admin(actor);
     return this.db.deliveryCompany.findMany({
-      select: { id: true, name: true, managerId: true },
+      select: { id: true, name: true, managerId: true, feePerOrder: true },
       orderBy: { name: 'asc' },
     });
   }
@@ -210,9 +293,35 @@ export class DispatchService {
     const manager = await this.db.user.findFirst({ where: { user_id: dto.managerId, ...merchantAccount }, select: { user_id: true } });
     if (!manager) throw new NotFoundException('An active verified business account is required');
     try {
-      return await this.db.deliveryCompany.create({ data: { name: dto.name.trim(), managerId: manager.user_id } });
+      return await this.db.deliveryCompany.create({
+        data: {
+          name: dto.name.trim(),
+          managerId: manager.user_id,
+          ...(dto.feePerOrder !== undefined && { feePerOrder: new Prisma.Decimal(dto.feePerOrder) }),
+        },
+        select: { id: true, name: true, managerId: true, feePerOrder: true },
+      });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw new ConflictException('This account already manages a delivery company');
+      throw error;
+    }
+  }
+
+  async updateCompany(actor: Actor, id: number, dto: UpdateDeliveryCompanyDto) {
+    this.admin(actor);
+    try {
+      return await this.db.deliveryCompany.update({
+        where: { id },
+        data: {
+          ...(dto.name !== undefined && { name: dto.name.trim() }),
+          ...(dto.feePerOrder !== undefined && { feePerOrder: new Prisma.Decimal(dto.feePerOrder) }),
+        },
+        select: { id: true, name: true, managerId: true, feePerOrder: true },
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+        throw new NotFoundException('Delivery company not found');
+      }
       throw error;
     }
   }

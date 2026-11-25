@@ -50,10 +50,15 @@ describe('SMS outbox and provider', () => {
     const outbox = { NODE_ENV: 'production', SMS_PROVIDER: 'twilio', SMS_OUTBOX_KEY: 'a'.repeat(64) };
     const api = {
       ...outbox, DATABASE_URL: 'mysql://api:example@localhost/wasla', REDIS_URL: 'redis://localhost',
+      CORS_ORIGIN: 'https://app.example.com',
       JWT_SECRET: 'b'.repeat(64), JWT_REFRESH_SECRET: 'c'.repeat(64),
       OTP_SIGNING_SECRET: 'd'.repeat(64), DELIVERY_CODE_SECRET: 'e'.repeat(64),
     };
     expect(validateEnvironment(api)).toBe(api);
+    expect(() => validateEnvironment({ ...api, CORS_ORIGIN: '' })).toThrow('CORS_ORIGIN');
+    expect(() => validateEnvironment({ ...api, PLATFORM_COMMISSION_BPS: '6000' })).toThrow('PLATFORM_COMMISSION_BPS');
+    expect(() => validateEnvironment({ ...api, DELIVERY_BASE_FEE_ILS: '-1' })).toThrow('DELIVERY_BASE_FEE_ILS');
+    expect(() => validateEnvironment({ ...api, PLATFORM_BANK_TRANSFER_PHONE: '123' })).toThrow('PLATFORM_BANK_TRANSFER_PHONE');
     expect(() => validateSmsEnvironment(outbox)).toThrow('Twilio credentials');
     const worker = {
       ...outbox, TWILIO_ACCOUNT_SID: `AC${'1'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'fixture',

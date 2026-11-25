@@ -1,7 +1,6 @@
-import { IsString, IsNotEmpty, MinLength, Matches, IsEnum, IsOptional } from 'class-validator';
+import { IsString, IsNotEmpty, MinLength, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AUTH_CONSTANTS } from '../constants/auth.constants';
-import { UserRole } from '@prisma/client';
 
 export class LoginDto {
     @ApiProperty({
@@ -25,14 +24,4 @@ export class LoginDto {
     @IsNotEmpty()
     @MinLength(AUTH_CONSTANTS.MIN_PASSWORD_LENGTH)
     password: string;
-
-    @ApiProperty({
-        example: 'customer',
-        description: 'User role: customer, store_owner, driver, admin',
-        required: false,
-        enum: UserRole,
-    })
-    @IsEnum(UserRole, { message: 'Invalid role specified' })
-    @IsOptional()
-    role?: UserRole = UserRole.customer;
 }

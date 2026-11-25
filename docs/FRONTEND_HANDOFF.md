@@ -18,7 +18,7 @@ The local Docker base URL is `http://127.0.0.1:5050/api/v1`. Swagger is availabl
 Set `E2E_ALLOW_DATABASE=1` and, from `apps/api`, run `npm run test:e2e -- --runInBand` against the migrated test database to verify the controller routes. The suite compares the registered route inventory with the HTTP responses observed during the run.
 
 
-Registration begins with `POST /auth/register` using only `phone`. The response is a generic acknowledgement. Complete registration with `POST /auth/verify-otp` using `phone`, `code`, `full_name`, and `password`. Clients that choose another self-registration role send it at verification. Existing verified accounts continue to use login.
+Registration begins with `POST /auth/register` using `phone` and the selected `role` (`customer`, `store_owner`, or `driver`). The generic acknowledgement does not reveal account state. When an OTP is issued, the server stores the selection until verification. Submit `phone`, `code`, `full_name`, and `password` to `POST /auth/verify-otp`. An optional role sent at verification must match the pending selection. Legacy clients that started without a role may still choose it at verification. Existing verified accounts authenticate with their stored role.
 
 Store and product status endpoints keep their existing paths. Send `{ isOpenNow: boolean }` to `toggle-status` and `{ isAvailable: boolean }` to `toggle-availability`. Repeating the same request preserves the requested value. Deleting a store archives it and preserves order and moderation history.
 

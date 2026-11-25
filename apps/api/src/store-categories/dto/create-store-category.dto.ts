@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsBoolean, IsInt, Min } from 'class-validator';
+import { IsString, IsOptional, IsBoolean, IsInt, Min, Max, ValidateIf } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
@@ -33,4 +33,13 @@ export class CreateStoreCategoryDto {
     @IsBoolean()
     @IsOptional()
     isActive?: boolean;
+
+    @ApiPropertyOptional({ example: 500, description: 'نسبة العمولة الافتراضية بنقاط الأساس (500 = 5%)' })
+    @IsOptional()
+    @ValidateIf((_, value) => value !== null)
+    @Type(() => Number)
+    @IsInt()
+    @Min(0)
+    @Max(5000)
+    defaultCommissionBps?: number | null;
 }

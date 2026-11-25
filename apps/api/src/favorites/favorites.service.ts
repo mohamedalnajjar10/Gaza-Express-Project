@@ -1,4 +1,4 @@
-import { PageDto, pageWindow } from 'src/common/dto/page.dto';
+import { FavoritesPageDto, favoritesPageWindow } from './dto/favorites-page.dto';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
 
@@ -25,9 +25,9 @@ export class FavoritesService {
     return { message: 'Removed from favorites' };
   }
 
-  async getMyFavoriteStores(userId: number, page = new PageDto()) {
+  async getMyFavoriteStores(userId: number, page = new FavoritesPageDto()) {
     return this.prisma.storeFavorite.findMany({
-      ...pageWindow(page), orderBy: { favoriteId: 'desc' },
+      ...favoritesPageWindow(page), orderBy: { favoriteId: 'desc' },
       where: { userId, store: { status: 'ACTIVE' } },
       include: {
         store: {
@@ -72,9 +72,9 @@ export class FavoritesService {
     return { message: 'Removed from favorites' };
   }
 
-  async getMyFavoriteProducts(userId: number, page = new PageDto()) {
+  async getMyFavoriteProducts(userId: number, page = new FavoritesPageDto()) {
     return this.prisma.productFavorite.findMany({
-      ...pageWindow(page), orderBy: { favoriteId: 'desc' },
+      ...favoritesPageWindow(page), orderBy: { favoriteId: 'desc' },
       where: { userId, product: { isAvailable: true, store: { status: 'ACTIVE' } } },
       include: {
         product: {

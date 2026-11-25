@@ -1,10 +1,34 @@
+import { BankPayment } from './bank-payment';
 import { api, json } from '../../shared/api/client';
 import { type Order } from './types';
 import { type Profile } from '../../shared/auth/types';
 import { money } from '../../shared/lib/money';
+import { formatBpsPct, normalizeDigits } from '../../shared/lib/numbers';
 import { ActionForm, Field } from '../../shared/ui/form';
 import { Result } from '../../shared/ui/feedback';
 import { useResource } from '../../shared/hooks/use-resource';
+
+const paymentStatusLabels: Record<string, string> = {
+  DUE: 'بانتظار الدفع',
+  PAID: 'مدفوع',
+  VOID: 'ملغى',
+  REFUND_REQUIRED: 'مطلوب الاسترداد',
+  REFUNDED: 'مسترد (REFUNDED)',
+};
+
+const entryKindLabels: Record<string, string> = {
+  COLLECTION: 'تحصيل المبلغ',
+  STORE_PAYABLE: 'مستحق للمتجر',
+  DRIVER_PAYABLE: 'مستحق للسائق',
+  PLATFORM_REVENUE: 'إيراد المنصة',
+  CASH_HANDOVER: 'توريد نقدي للمنصة',
+  STORE_PAYOUT: 'صرف مستحقات المتجر',
+  DRIVER_PAYOUT: 'صرف مستحقات السائق',
+  REFUND: 'رد مبلغ للعميل',
+  cash_handover: 'توريد نقدي للمنصة',
+  store_payout: 'صرف مستحقات المتجر',
+  driver_payout: 'صرف مستحقات السائق',
+};
 
 export function OrderActions({
   order,
@@ -32,12 +56,15 @@ export function OrderActions({
     (action: string, numeric?: string) => async (data: FormData) => {
       const fields = Object.fromEntries(data.entries());
       const { deliveryCompanyId, ...actionFields } = fields;
+      if (actionFields.deliveryCode !== undefined) {
+        actionFields.deliveryCode = normalizeDigits(String(actionFields.deliveryCode)).trim();
+      }
       await api(
         `/orders/${id}/status`,
         json('PATCH', {
           ...actionFields,
           ...(deliveryCompanyId !== undefined && { deliveryCompanyId: deliveryCompanyId ? Number(deliveryCompanyId) : null }),
-          ...(numeric && { [numeric]: Number(fields[numeric]) }),
+          ...(numeric && { [numeric]: Number(normalizeDigits(String(fields[numeric] ?? ''))) }),
           action,
           version,
         }),
@@ -74,6 +101,15 @@ export function OrderActions({
               label="إرسال عرض السعر"
               submit={submit('quote', 'total')}
             >
+              <p className="bop-detail-label">
+                تقدير العميل للمنتجات: {money(order.estimatedMin, order.currency)}
+                {order.estimatedMax && order.estimatedMax !== order.estimatedMin
+                  ? ` – ${money(order.estimatedMax, order.currency)}`
+                  : ''}
+                {order.deliveryFee != null
+                  ? ` · رسوم التوصيل الحالية: ${Number(order.deliveryFee) > 0 ? money(order.deliveryFee, order.currency) : 'مجاني'}`
+                  : ''}
+              </p>
               <Field
                 label="الإجمالي المقترح"
                 name="total"
@@ -171,7 +207,7 @@ export function OrderActions({
                   label="رمز العميل"
                   name="deliveryCode"
                   inputMode="numeric"
-                  pattern="[0-9]{6}"
+                  pattern="[0-9٠-٩۰-۹]{6}"
                   maxLength={6}
                 />
                 {order.paymentMethod === 'CASH' && (
@@ -181,6 +217,7 @@ export function OrderActions({
                     type="number"
                     min={0}
                     step="0.01"
+                    defaultValue={order.finalTotal ?? order.proposedTotal ?? ''}
                   />
                 )}
               </ActionForm>
@@ -217,7 +254,13 @@ type PaymentData = {
   status: string;
   amount: string;
   currency: string;
-  whatsappReceivedAt?: string;
+  storeCollected?: boolean;
+  commissionBpsApplied?: number;
+  deliveryFee?: string;
+  companyFeeApplied?: string;
+  storeShare?: string;
+  driverShare?: string;
+  platformShare?: string;
   entries: { id: number; kind: string; amount: string; reference?: string }[];
 };
 
@@ -233,54 +276,37 @@ function Payment({ order }: { order: Order }) {
         {payment => (
           <>
             <p>
-              {money(payment.amount, payment.currency)} · {payment.status}
+              {money(payment.amount, payment.currency)} · {paymentStatusLabels[payment.status] ?? payment.status}
             </p>
+            {(payment.storeShare != null || payment.platformShare != null) && (
+              <div className="bop-receipt-meta">
+                <span>نسبة العمولة: {formatBpsPct(payment.commissionBpsApplied)}</span>
+                {payment.storeShare != null && <span>حصة المتجر: {money(payment.storeShare, payment.currency)}</span>}
+                {payment.driverShare != null && <span>حصة السائق: {money(payment.driverShare, payment.currency)}</span>}
+                {payment.platformShare != null && <span>حصة المنصة: {money(payment.platformShare, payment.currency)}</span>}
+                {Number(payment.deliveryFee ?? 0) > 0 && <span>رسوم التوصيل: {money(payment.deliveryFee!, payment.currency)}</span>}
+                {Number(payment.companyFeeApplied ?? 0) > 0 && <span>رسوم شركة التوصيل: {money(payment.companyFeeApplied!, payment.currency)}</span>}
+              </div>
+            )}
             <ul>
               {payment.entries.map(entry => (
                 <li key={entry.id}>
-                  {entry.kind} · {money(entry.amount, payment.currency)}{' '}
+                  {entryKindLabels[entry.kind] ?? entry.kind} · {money(entry.amount, payment.currency)}{' '}
                   {entry.reference}
                 </li>
               ))}
             </ul>
-            {payment.method === 'BANK_TRANSFER' &&
-              ['DUE', 'VOID'].includes(payment.status) &&
-              (payment.whatsappReceivedAt ? (
-                <ActionForm
-                  label="تأكيد المطابقة مع كشف البنك"
-                  submit={async data => {
-                    await api(
-                      `/orders/${order.id}/payment/bank-reconciliation`,
-                      json('POST', {
-                        amount: Number(data.get('amount')),
-                        currency: payment.currency,
-                        reference: data.get('reference'),
-                      }),
-                    );
-                    state.reload();
-                  }}
-                >
-                  <Field
-                    label="المبلغ في كشف البنك"
-                    name="amount"
-                    type="number"
-                    min={0}
-                    step="0.01"
-                  />
-                  <Field label="مرجع البنك" name="reference" maxLength={70} />
-                </ActionForm>
-              ) : (
-                <p>بانتظار وصول إشعار واتساب.</p>
-              ))}
+            {payment.method === 'BANK_TRANSFER' && <BankPayment id={order.id} role="admin" onConfirmed={state.reload} />}
             {payment.status === 'REFUND_REQUIRED' && (
               <ActionForm label="تسجيل رد المبلغ بعد تنفيذه" submit={async data => {
                 await api(`/orders/${order.id}/payment/refund`, json('POST', {
-                  amount: Number(data.get('amount')), currency: payment.currency, reference: data.get('reference'),
+                  amount: Number(data.get('amount')), currency: payment.currency, reference: String(data.get('reference') ?? '').trim(),
                 }));
                 state.reload();
               }}>
-                <Field label="المبلغ المسترد" name="amount" type="number" min={0} step="0.01" />
-                <Field label="مرجع الاسترداد" name="reference" maxLength={70} />
+                <Field label="المبلغ المسترد" name="amount" type="number" min={0} step="0.01" defaultValue={payment.amount} />
+                <Field label="مرجع الاسترداد" name="reference" pattern="[A-Za-z0-9_.:-]{3,70}" maxLength={70} />
+                <small>استخدم 3 إلى 70 حرفًا إنجليزيًا أو رقمًا أو الرموز . _ : - (مثل: refund-ref).</small>
               </ActionForm>
             )}
             {order.status === 'DELIVERED' && (
@@ -289,7 +315,10 @@ function Payment({ order }: { order: Order }) {
                 submit={async data => {
                   await api(
                     `/orders/${order.id}/settlements`,
-                    json('POST', Object.fromEntries(data)),
+                    json('POST', {
+                      kind: data.get('kind'),
+                      reference: String(data.get('reference') ?? '').trim(),
+                    }),
                   );
                   state.reload();
                 }}
@@ -297,14 +326,15 @@ function Payment({ order }: { order: Order }) {
                 <label>
                   نوع التسوية
                   <select name="kind">
-                    {payment.method === 'CASH' && (
-                      <option value="cash_handover">توريد النقد</option>
+                    {(payment.method === 'CASH' || payment.storeCollected) && (
+                      <option value="cash_handover">توريد المبلغ للمنصة</option>
                     )}
                     <option value="store_payout">مستحقات المتجر</option>
                     <option value="driver_payout">مستحقات السائق</option>
                   </select>
                 </label>
-                <Field label="مرجع التسوية" name="reference" maxLength={100} />
+                <Field label="مرجع التسوية" name="reference" pattern="[A-Za-z0-9_.:-]{3,100}" maxLength={100} />
+                <small>استخدم 3 إلى 100 حرف إنجليزي أو رقم أو الرموز . _ : - (مثل: SET-2026-01).</small>
               </ActionForm>
             )}
           </>

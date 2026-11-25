@@ -49,7 +49,7 @@ async function fillAddress(page: Page) {
   await page.getByLabel('اسم العنوان (اختياري)').fill('بيتي');
 }
 
-test('address onboarding can be skipped once, then saved at checkout and edited later', async ({ page }) => {
+test('address onboarding can be skipped once, then saved at checkout and edited later', async ({ page, browserName }) => {
   const { writes } = await fixture(page);
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'إضافة عنوانك' })).toBeVisible();
@@ -62,7 +62,7 @@ test('address onboarding can be skipped once, then saved at checkout and edited 
   await page.goto('/checkout');
   await fillAddress(page);
   await page.getByRole('heading', { name: 'إضافة عنوانك' }).click();
-  await page.screenshot({ path: test.info().outputPath('address-form.png'), fullPage: true, scale: 'css' });
+  if (browserName === 'chromium') await page.screenshot({ path: test.info().outputPath('address-form.png'), fullPage: true, scale: 'css' });
   await page.getByRole('button', { name: 'موقعي الحالي' }).click();
   await expect(page.getByText('تم تحديد الموقع', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'حفظ العنوان', exact: true }).click();

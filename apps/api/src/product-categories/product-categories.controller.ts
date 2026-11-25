@@ -1,3 +1,4 @@
+import type { AuthenticatedRequest } from 'src/common/authenticated-request';
 import { StorePageDto } from 'src/common/dto/page.dto';
 import { Request, Controller, Get, Post, Body, Patch, Delete, Param, Query, ParseIntPipe, UseGuards } from '@nestjs/common';
 import { ProductCategoriesService } from './product-categories.service';
@@ -18,14 +19,14 @@ export class ProductCategoriesController {
   @Get()
   @ApiOperation({ summary: 'Get all product categories (optional filter by storeId)' })
   @ApiQuery({ name: 'storeId', required: false, type: Number })
-  findAll(@Query() page: StorePageDto) {
-    return this.service.findAll(page.storeId, page);
+  findAll(@Request() req: AuthenticatedRequest, @Query() page: StorePageDto) {
+    return this.service.findAll(page.storeId, page, req.user);
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get product category by ID' })
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.service.findOne(id);
+  findOne(@Request() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number) {
+    return this.service.findOne(id, req.user);
   }
 
   @Post()
@@ -33,8 +34,8 @@ export class ProductCategoriesController {
   @Roles(UserRole.store_owner, UserRole.admin)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Create product category (store owner or admin)' })
-  create(@Request() req, @Body() dto: CreateProductCategoryDto) {
-    return this.service.create(req.user.user_id, dto);
+  create(@Request() req: AuthenticatedRequest, @Body() dto: CreateProductCategoryDto) {
+    return this.service.create(req.user, dto);
   }
 
   @Patch(':id')
@@ -42,8 +43,8 @@ export class ProductCategoriesController {
   @Roles(UserRole.store_owner, UserRole.admin)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Update product category' })
-  update(@Request() req, @Param('id', ParseIntPipe) id: number, @Body() dto: UpdateProductCategoryDto) {
-    return this.service.update(req.user.user_id, id, dto);
+  update(@Request() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: UpdateProductCategoryDto) {
+    return this.service.update(req.user, id, dto);
   }
 
   @Delete(':id')
@@ -51,7 +52,7 @@ export class ProductCategoriesController {
   @Roles(UserRole.store_owner, UserRole.admin)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Delete product category' })
-  remove(@Request() req, @Param('id', ParseIntPipe) id: number) {
-    return this.service.remove(req.user.user_id, id);
+  remove(@Request() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number) {
+    return this.service.remove(req.user, id);
   }
 }

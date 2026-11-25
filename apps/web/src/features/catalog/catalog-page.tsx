@@ -54,7 +54,7 @@ export default function CatalogPage() {
     <>
       <section className="market-hero">
         <div className="hero-content">
-          {customer && <Link className="market-location" to="/addresses"><MapPin size={18} /> عنوان التوصيل <ArrowLeft size={16} /></Link>}
+          {customer && <Link className="market-location" to="/addresses"><MapPin size={18} aria-hidden="true" /> عنوان التوصيل <ArrowLeft size={16} aria-hidden="true" /></Link>}
           <h1>شو بتحب تطلب اليوم؟</h1>
           <form
             className="search"
@@ -68,7 +68,7 @@ export default function CatalogPage() {
               });
             }}
           >
-            <Search size={21} />
+            <Search size={21} aria-hidden="true" />
             <input
               key={search}
               name="search"

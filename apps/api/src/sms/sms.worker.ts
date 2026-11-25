@@ -4,6 +4,7 @@ import { SMS_PROVIDER, type SmsProvider, type SendOutcome } from './sms.provider
 import { SmsService } from './sms.service';
 
 const maxAttempts = 3;
+const sweepBatchSize = 100;
 
 @Injectable()
 export class SmsWorker {
@@ -17,8 +18,28 @@ export class SmsWorker {
       this.nextReconcileAt = now.getTime() + 5000;
       await this.reconcileOne(now);
     }
-    await this.db.smsJob.updateMany({ where: { status: 'PENDING', expiresAt: { lte: now } }, data: { status: 'EXPIRED', payload: null } });
-    await this.db.smsJob.updateMany({ where: { status: 'PROCESSING', leaseUntil: { lte: now } }, data: { status: 'UNKNOWN', payload: null, leaseUntil: null, errorCode: 'lease_expired' } });
+    const expiredPending = await this.db.smsJob.findMany({
+      where: { status: 'PENDING', expiresAt: { lte: now } },
+      select: { id: true },
+      take: sweepBatchSize,
+    });
+    if (expiredPending.length > 0) {
+      await this.db.smsJob.updateMany({
+        where: { id: { in: expiredPending.map(item => item.id) }, status: 'PENDING', expiresAt: { lte: now } },
+        data: { status: 'EXPIRED', payload: null },
+      });
+    }
+    const expiredLeases = await this.db.smsJob.findMany({
+      where: { status: 'PROCESSING', leaseUntil: { lte: now } },
+      select: { id: true },
+      take: sweepBatchSize,
+    });
+    if (expiredLeases.length > 0) {
+      await this.db.smsJob.updateMany({
+        where: { id: { in: expiredLeases.map(item => item.id) }, status: 'PROCESSING', leaseUntil: { lte: now } },
+        data: { status: 'UNKNOWN', payload: null, leaseUntil: null, errorCode: 'lease_expired' },
+      });
+    }
     const job = await this.db.smsJob.findFirst({ where: { status: 'PENDING', availableAt: { lte: now }, expiresAt: { gt: now } }, orderBy: [{ availableAt: 'asc' }, { id: 'asc' }] });
     if (!job) return false;
     const leaseUntil = new Date(Date.now() + 30_000);

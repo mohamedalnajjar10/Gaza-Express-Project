@@ -1,7 +1,7 @@
 import { RewardsCard } from './rewards';
 import { useState } from 'react';
 import { Pencil } from 'lucide-react';
-import { AccountAvatar } from './account-avatar';
+import { AccountAvatar } from '../../shared/ui/account-avatar';
 import { ProfileEditor } from './profile-editor';
 import { Link, useNavigate } from 'react-router-dom';
 import {

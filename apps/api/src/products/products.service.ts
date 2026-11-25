@@ -1,7 +1,8 @@
 import { PageDto, pageWindow } from 'src/common/dto/page.dto';
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException, Optional, ServiceUnavailableException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, UserRole } from '@prisma/client';
 import { CreateProductDto } from './dto/create-product.dto';
+import { CreateProductOptionDto, UpdateProductOptionDto } from './dto/product-option.dto';
 import { PrismaService } from 'prisma/prisma.service';
 import { ProductMediaService } from './product-media.service';
 
@@ -41,13 +42,15 @@ export class ProductsService {
     }));
   }
 
-  async findByStore(storeId: number, availableOnly = true, page: PageDto & { categoryId?: number; q?: string } = new PageDto(), viewerId?: number) {
+  async findByStore(storeId: number, availableOnly = true, page: PageDto & { categoryId?: number; q?: string; lookahead?: '1' } = new PageDto(), viewerId?: number) {
     if (!availableOnly) {
       if (viewerId === undefined) throw new ForbiddenException('Store ownership required');
       await this.verifyStoreOwnership(storeId, viewerId);
     }
+    const { skip, take } = pageWindow(page);
     return this.prisma.product.findMany({
-      ...pageWindow(page),
+      skip,
+      take: take + (page.lookahead === '1' ? 1 : 0),
       where: {
         storeId,
         ...(availableOnly && { isAvailable: true, store: { status: 'ACTIVE' } }),
@@ -78,6 +81,52 @@ export class ProductsService {
 
   findOptions(productId: number, page: PageDto, viewerId?: number) {
     return this.prisma.productOption.findMany({ where: { productId, product: this.visibility(viewerId) }, orderBy: { optionId: 'asc' }, ...pageWindow(page) });
+  }
+
+  async createOption(actor: { user_id: number; role: UserRole }, productId: number, dto: CreateProductOptionDto) {
+    await this.verifyProductOptionOwnership(productId, actor);
+    return this.prisma.productOption.create({
+      data: {
+        productId,
+        optionName: dto.optionName.trim(),
+        ...(dto.optionNameAr !== undefined && { optionNameAr: dto.optionNameAr.trim() || null }),
+        ...(dto.extraCost !== undefined && { extraCost: dto.extraCost }),
+        ...(dto.isAvailable !== undefined && { isAvailable: dto.isAvailable }),
+      },
+    });
+  }
+
+  async updateOption(actor: { user_id: number; role: UserRole }, productId: number, optionId: number, dto: UpdateProductOptionDto) {
+    await this.verifyProductOptionOwnership(productId, actor);
+    const existing = await this.prisma.productOption.findFirst({ where: { optionId, productId }, select: { optionId: true } });
+    if (!existing) throw new NotFoundException('Product option not found');
+    return this.prisma.productOption.update({
+      where: { optionId },
+      data: {
+        ...(dto.optionName !== undefined && { optionName: dto.optionName.trim() }),
+        ...(dto.optionNameAr !== undefined && { optionNameAr: dto.optionNameAr === null ? null : dto.optionNameAr.trim() || null }),
+        ...(dto.extraCost !== undefined && { extraCost: dto.extraCost }),
+        ...(dto.isAvailable !== undefined && { isAvailable: dto.isAvailable }),
+      },
+    });
+  }
+
+  async deleteOption(actor: { user_id: number; role: UserRole }, productId: number, optionId: number) {
+    await this.verifyProductOptionOwnership(productId, actor);
+    const deleted = await this.prisma.productOption.deleteMany({ where: { optionId, productId } });
+    if (!deleted.count) throw new NotFoundException('Product option not found');
+    return { message: 'Product option deleted successfully' };
+  }
+
+  private async verifyProductOptionOwnership(productId: number, actor: { user_id: number; role: UserRole }) {
+    const product = await this.prisma.product.findUnique({
+      where: { productId },
+      select: { productId: true, store: { select: { ownerId: true } } },
+    });
+    if (!product) throw new NotFoundException('Product not found');
+    if (actor.role !== 'admin' && product.store.ownerId !== actor.user_id) {
+      throw new ForbiddenException('You are not the owner of this store');
+    }
   }
 
   async findOne(productId: number, viewerId?: number) {

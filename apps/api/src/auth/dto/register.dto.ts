@@ -5,13 +5,15 @@ import {
     IsOptional, MaxLength,
     IsEmail,
     Matches,
-    IsEnum,
     IsIn,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AUTH_CONSTANTS } from '../constants/auth.constants';
 import { UserRole } from '@prisma/client';
 import { PasswordBytes } from './password-bytes';
+
+const registrationRoles = [UserRole.customer, UserRole.store_owner, UserRole.driver] as const;
+export type RegistrationRole = (typeof registrationRoles)[number];
 
 export class RegisterDto {
     @ApiProperty({
@@ -25,6 +27,11 @@ export class RegisterDto {
         message: 'Phone number must start with 059 or 056 and consist of 10 digits',
     })
     phone: string;
+
+    @ApiProperty({ example: 'customer', required: false, enum: registrationRoles })
+    @IsIn(registrationRoles, { message: 'Invalid registration role' })
+    @IsOptional()
+    role?: RegistrationRole;
 }
 
 export class RegistrationProfileDto extends RegisterDto {
@@ -59,15 +66,4 @@ export class RegistrationProfileDto extends RegisterDto {
     @MaxLength(255)
     @IsOptional()
     email?: string;
-
-    @ApiProperty({
-        example: 'customer',
-        description: 'Self-registration role: customer, store_owner or driver',
-        required: false,
-        enum: UserRole,
-    })
-    @IsIn([UserRole.customer, UserRole.store_owner, UserRole.driver])
-    @IsEnum(UserRole, { message: 'Invalid role specified' })
-    @IsOptional()
-    role?: UserRole = UserRole.customer;
 }

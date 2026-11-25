@@ -2,11 +2,12 @@ import { useEffect, useRef, useState, type InputHTMLAttributes } from 'react';
 import { ArrowRight, Building2, Check, House, MapPin, BriefcaseBusiness, Trash2 } from 'lucide-react';
 import { useIdentity } from '../../shared/auth/identity';
 import { ApiError, api } from '../../shared/api/client';
+import { normalizeDigits } from '../../shared/lib/numbers';
 import { ActionForm } from '../../shared/ui/form';
 import { ErrorBox } from '../../shared/ui/feedback';
 import { AddressMap } from './address-map';
 import { saveAddress, type Address } from './address-api';
-import type { MapPoint } from './google-maps';
+import type { MapPoint } from '../../shared/lib/google-maps';
 import './addresses.css';
 
 const kinds = [
@@ -15,8 +16,9 @@ const kinds = [
   { value: 'OFFICE', label: 'مكتب', icon: BriefcaseBusiness },
 ] as const;
 
-export function AddressEditor({ address, onSaved, onCancel }: {
+export function AddressEditor({ address, createNew = false, onSaved, onCancel }: {
   address?: Address;
+  createNew?: boolean;
   onSaved: (address?: Address) => Promise<void>;
   onCancel?: () => void;
 }) {
@@ -68,8 +70,8 @@ export function AddressEditor({ address, onSaved, onCancel }: {
           label: label.trim() || type.label,
           address: fullAddress, latitude: point.lat, longitude: point.lng,
           area: area.trim(), residenceType: kind, building: building.trim(), floor: floor.trim(),
-          street: street.trim(), phone: prefix + phone.replace(/^0/, ''), directions: directions.trim(),
-        }, address?.id);
+          street: street.trim(), phone: prefix + normalizeDigits(phone).replace(/^0/, ''), directions: directions.trim(),
+        }, address?.id, createNew);
         await onSaved(saved);
       }}>
         {locationError && <p className="address-inline-error" role="alert">اختر موقع التوصيل للمتابعة.</p>}
@@ -94,7 +96,7 @@ export function AddressEditor({ address, onSaved, onCancel }: {
               <option value="+970">🇵🇸 +970</option><option value="+972">+972</option><option value="+20">🇪🇬 +20</option>
             </select>
           </label>
-          <label>رقم التواصل<input name="phone" type="tel" value={phone} onChange={event => setPhone(event.target.value.replace(/[^0-9]/g, ''))} required minLength={7} maxLength={11} autoComplete="tel-national" placeholder="59 123 4567" /></label>
+          <label>رقم التواصل<input name="phone" type="tel" value={phone} onChange={event => setPhone(normalizeDigits(event.target.value).replace(/[^0-9]/g, ''))} required minLength={7} maxLength={11} autoComplete="tel-national" placeholder="59 123 4567" /></label>
           {phone.length >= 7 && <Check size={17} className="address-check" aria-hidden="true" />}
         </div>
         <AddressField label="تعليمات إضافية (اختياري)" name="directions" value={directions} onChange={event => setDirections(event.target.value)} maxLength={300} placeholder="علامة مميزة تساعد المندوب على الوصول" />

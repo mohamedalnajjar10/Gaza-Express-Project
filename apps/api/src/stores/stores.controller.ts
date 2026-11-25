@@ -3,6 +3,7 @@ import { StoreAvailabilityDto } from 'src/common/dto/catalog-state.dto';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { StoreModerationDto, StoreModerationPageDto } from './dto/store-moderation.dto';
+import { StoreMonetizationDto } from './dto/store-monetization.dto';
 import { PageDto } from 'src/common/dto/page.dto';
 import { UpdateStoreDto } from './dto/update-store.dto';
 import {
@@ -56,6 +57,15 @@ export class StoresController {
   @ApiBearerAuth()
   moderate(@Request() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number, @Body() dto: StoreModerationDto) {
     return this.service.moderate(req.user.user_id, id, dto);
+  }
+
+  @Patch(':id/monetization')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Update store plan tier and commission (admin only)' })
+  updateMonetization(@Param('id', ParseIntPipe) id: number, @Body() dto: StoreMonetizationDto) {
+    return this.service.updateMonetization(id, dto);
   }
 
   @Get(':id')

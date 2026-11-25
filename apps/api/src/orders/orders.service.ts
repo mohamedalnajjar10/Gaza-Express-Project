@@ -1,162 +1,96 @@
+import { lockCustomer, priceCart } from './cart-pricing';
+import { calculateDeliveryFee, distanceKm } from './delivery-pricing';
 import { transitions } from './order-transitions';
-import { PageDto, pageWindow } from 'src/common/dto/page.dto';
 import { recordNotifications } from '../notifications/record-notifications';
 import {
-  BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException,
+  BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional,
 } from '@nestjs/common';
-import { Prisma, UserRole } from '@prisma/client';
+import { ConfigService } from '@nestjs/config';
+import { CustomerOrder, Prisma, UserRole } from '@prisma/client';
 import { createHash, randomUUID, timingSafeEqual } from 'crypto';
 import { FinanceService } from '../finance/finance.service';
 import { PrismaService } from 'prisma/prisma.service';
-import { AddressDto, CartItemDto, CheckoutDto, OrderAction, OrderActionDto, ReplaceCartDto } from './orders.dto';
+import { CartItemDto, CheckoutDto, DeliveryQuoteDto, OrderAction, OrderActionDto } from './orders.dto';
 import { DispatchService } from './dispatch.service';
-import { OrderUpdates } from './order-updates';
+import { OrderUpdates } from '../infrastructure/order-updates';
 
 type Actor = { user_id: number; role: UserRole };
-const emptyCart = { version: 0, storeId: null, items: [] };
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly db: PrismaService, private readonly finance: FinanceService, private readonly dispatch: DispatchService, private readonly updates: OrderUpdates) {}
+  constructor(
+    private readonly db: PrismaService,
+    private readonly finance: FinanceService,
+    private readonly dispatch: DispatchService,
+    private readonly updates: OrderUpdates,
+    @Optional() private readonly config?: ConfigService,
+  ) {}
 
   private customer(actor: Actor) {
     if (actor.role !== 'customer') throw new ForbiddenException('Customer account required');
     return actor.user_id;
   }
 
-  addresses(actor: Actor, page = new PageDto()) {
-    return this.db.deliveryAddress.findMany({ where: { customerId: actor.user_id }, orderBy: { id: 'desc' }, ...pageWindow(page) });
-  }
-
-  async skipAddressOnboarding(actor: Actor) {
-    await this.db.user.updateMany({
-      where: { user_id: actor.user_id, addressPromptedAt: null },
-      data: { addressPromptedAt: new Date() },
-    });
-    return { acknowledged: true };
-  }
-
-  async saveDefaultAddress(actor: Actor, dto: AddressDto) {
-    return this.db.$transaction(async tx => {
-      await this.lockCustomer(tx, actor.user_id);
-      const user = await tx.user.findUniqueOrThrow({ where: { user_id: actor.user_id }, select: { defaultAddressId: true } });
-      const current = user.defaultAddressId
-        ? await tx.deliveryAddress.findFirst({ where: { id: user.defaultAddressId, customerId: actor.user_id } })
-        : await tx.deliveryAddress.findFirst({ where: { customerId: actor.user_id }, orderBy: { id: 'desc' } });
-      const data = this.addressData(dto);
-      const saved = current
-        ? await tx.deliveryAddress.update({ where: { id: current.id }, data })
-        : await tx.deliveryAddress.create({ data: { ...data, customerId: actor.user_id } });
-      await tx.user.update({ where: { user_id: actor.user_id }, data: { defaultAddressId: saved.id, addressPromptedAt: new Date() } });
-      return saved;
-    });
-  }
-
-  async createAddress(actor: Actor, dto: AddressDto) {
-    return this.db.$transaction(async tx => {
-      await this.lockCustomer(tx, actor.user_id);
-      const saved = await tx.deliveryAddress.create({ data: { ...this.addressData(dto), customerId: actor.user_id } });
-      const user = await tx.user.findUniqueOrThrow({ where: { user_id: actor.user_id }, select: { defaultAddressId: true } });
-      await tx.user.update({
-        where: { user_id: actor.user_id },
-        data: { addressPromptedAt: new Date(), defaultAddressId: user.defaultAddressId ?? saved.id },
-      });
-      return saved;
-    });
-  }
-
-  async updateAddress(actor: Actor, id: number, dto: AddressDto) {
-    return this.db.$transaction(async tx => {
-      await this.lockCustomer(tx, actor.user_id);
-      const result = await tx.deliveryAddress.updateMany({ where: { id, customerId: actor.user_id }, data: this.addressData(dto) });
-      if (!result.count) throw new NotFoundException('Address not found');
-      await tx.user.update({ where: { user_id: actor.user_id }, data: { defaultAddressId: id, addressPromptedAt: new Date() } });
-      return tx.deliveryAddress.findUniqueOrThrow({ where: { id } });
-    });
-  }
-
-  async deleteAddress(actor: Actor, id: number) {
-    await this.db.$transaction(async tx => {
-      await this.lockCustomer(tx, actor.user_id);
-      const result = await tx.deliveryAddress.deleteMany({ where: { id, customerId: actor.user_id } });
-      if (!result.count) throw new NotFoundException('Address not found');
-      const user = await tx.user.findUniqueOrThrow({ where: { user_id: actor.user_id }, select: { defaultAddressId: true } });
-      if (!user.defaultAddressId) {
-        const next = await tx.deliveryAddress.findFirst({ where: { customerId: actor.user_id }, orderBy: { id: 'desc' }, select: { id: true } });
-        await tx.user.update({ where: { user_id: actor.user_id }, data: { defaultAddressId: next?.id ?? null } });
-      }
-    });
-  }
-
-  private addressData(dto: AddressDto) {
-    return {
-      ...dto, label: dto.label.trim(), address: dto.address.trim(),
-      ...(dto.area !== undefined && { area: dto.area.trim() }),
-      ...(dto.building !== undefined && { building: dto.building.trim() }),
-      ...(dto.floor !== undefined && { floor: dto.floor.trim() }),
-      ...(dto.street !== undefined && { street: dto.street.trim() }),
-      ...(dto.directions !== undefined && { directions: dto.directions.trim() }),
-    };
-  }
-
-  async cart(actor: Actor) {
-    const cart = (await this.db.shoppingCart.findUnique({ where: { customerId: this.customer(actor) } })) ?? emptyCart;
-    const items = cart.items as CartItemDto[];
-    if (!items.length) return { ...cart, store: null, items, products: [], estimatedMin: '0', estimatedMax: '0' };
-    const [store, products] = await Promise.all([
-      cart.storeId ? this.db.store.findUnique({ where: { storeId: cart.storeId }, select: { storeName: true, storeNameAr: true } }) : null,
-      this.db.product.findMany({
-      where: { productId: { in: items.map(item => item.productId) } },
-      select: {
-        productId: true, nameAr: true, imageUrl: true, unitAr: true, isAvailable: true,
-        estimatedPriceMin: true, estimatedPriceMax: true, isPriceFixed: true,
-        productOptions: { select: { optionId: true, optionName: true, optionNameAr: true, extraCost: true, isAvailable: true } },
-      },
-      }),
-    ]);
-    const byId = new Map(products.map(product => [product.productId, product]));
-    let min = new Prisma.Decimal(0);
-    let max = new Prisma.Decimal(0);
-    for (const item of items) {
-      const product = byId.get(item.productId);
-      const options = product?.productOptions.filter(option => option.isAvailable && item.optionIds.includes(option.optionId));
-      if (!product?.isAvailable || options?.length !== item.optionIds.length) {
-        return { ...cart, store, items, products, estimatedMin: null, estimatedMax: null, needsReview: true };
-      }
-      const extra = options.reduce((sum, option) => sum.plus(option.extraCost), new Prisma.Decimal(0));
-      min = min.plus(product.estimatedPriceMin.plus(extra).times(item.quantity));
-      max = max.plus((product.isPriceFixed ? product.estimatedPriceMin : product.estimatedPriceMax).plus(extra).times(item.quantity));
+  private deliveryDefaults() {
+    const baseFee = new Prisma.Decimal(this.config?.get('DELIVERY_BASE_FEE_ILS', '0') ?? '0');
+    const perKmFee = new Prisma.Decimal(this.config?.get('DELIVERY_PER_KM_FEE_ILS', '0') ?? '0');
+    if (!baseFee.isFinite() || baseFee.lt(0) || baseFee.decimalPlaces() > 2 || !perKmFee.isFinite() || perKmFee.lt(0) || perKmFee.decimalPlaces() > 2) {
+      throw new ConflictException('Invalid delivery pricing configuration');
     }
-    return { ...cart, store, items, products, estimatedMin: min.toString(), estimatedMax: max.toString() };
-  }
-
-  async replaceCart(actor: Actor, dto: ReplaceCartDto) {
-    const customerId = this.customer(actor);
-    return this.db.$transaction(async tx => {
-      await this.lockCustomer(tx, customerId);
-      const current = await tx.shoppingCart.findUnique({ where: { customerId } });
-      if ((current?.version ?? 0) !== dto.version) throw new ConflictException('Cart has changed');
-      const catalog = dto.items.length ? await this.catalog(tx, dto.items) : null;
-      const items = dto.items.map(({ productId, quantity, optionIds }) => ({ productId, quantity, optionIds }));
-      const data = { storeId: catalog?.store.storeId ?? null, items, version: dto.version + 1 };
-      const cart = await tx.shoppingCart.upsert({ where: { customerId }, create: { customerId, ...data }, update: data });
-      return { ...cart, items, estimatedMin: catalog?.min.toString() ?? '0', estimatedMax: catalog?.max.toString() ?? '0' };
-    });
+    return { baseFee, perKmFee };
   }
 
   private async rewardBalance(db: { customerOrder: Pick<Prisma.TransactionClient['customerOrder'], 'groupBy'> }, customerId: number) {
     const rows = await db.customerOrder.groupBy({
       by: ['status'],
       where: { customerId, status: { notIn: ['CANCELLED', 'REJECTED'] } },
-      _count: { _all: true },
-      _sum: { rewardPointsUsed: true },
+      _sum: { rewardPointsUsed: true, rewardPointsEarned: true },
     });
-    const earned = (rows.find(row => row.status === 'DELIVERED')?._count._all ?? 0) * 10;
+    const earned = rows.find(row => row.status === 'DELIVERED')?._sum.rewardPointsEarned ?? 0;
     return earned - rows.reduce((used, row) => used + (row._sum.rewardPointsUsed ?? 0), 0);
   }
 
   async rewards(actor: Actor) {
-    return { balance: await this.rewardBalance(this.db, this.customer(actor)), pointsPerOrder: 10, pointsRequired: 100, discountPercent: 5 };
+    return {
+      balance: await this.rewardBalance(this.db, this.customer(actor)),
+      pointsPerOrder: 10,
+      bankTransferPointsPerOrder: 20,
+      pointsRequired: 100,
+      discountPercent: 5,
+    };
+  }
+
+  async deliveryQuote(actor: Actor, dto: DeliveryQuoteDto) {
+    const customerId = this.customer(actor);
+    const [store, address] = await Promise.all([
+      this.db.store.findUnique({
+        where: { storeId: dto.storeId },
+        select: {
+          storeId: true, status: true, latitude: true, longitude: true,
+          deliveryRangeKm: true, minOrderAmount: true,
+          deliveryBaseFee: true, deliveryPerKmFee: true, freeDeliveryThreshold: true,
+        },
+      }),
+      this.db.deliveryAddress.findFirst({ where: { id: dto.addressId, customerId } }),
+    ]);
+    if (!store || store.status !== 'ACTIVE') throw new NotFoundException('Store not found');
+    if (!address) throw new NotFoundException('Address not found');
+    if (store.latitude === null || store.longitude === null) {
+      throw new ConflictException('موقع المتجر غير محدد. تواصل مع المتجر لتحديث موقعه قبل الطلب.');
+    }
+    const rawDistance = distanceKm(+store.latitude, +store.longitude, +address.latitude, +address.longitude);
+    const pricing = calculateDeliveryFee(rawDistance, new Prisma.Decimal(dto.itemsSubtotal ?? 0), store, this.deliveryDefaults());
+    return {
+      storeId: store.storeId,
+      addressId: address.id,
+      deliveryDistanceKm: pricing.distanceKm.toFixed(2),
+      deliveryRangeKm: store.deliveryRangeKm.toString(),
+      withinRange: rawDistance <= +store.deliveryRangeKm,
+      deliveryFee: pricing.deliveryFee.toFixed(2),
+      freeDeliveryApplied: pricing.freeDeliveryApplied,
+      freeDeliveryThreshold: store.freeDeliveryThreshold?.toString() ?? null,
+      minimumAmount: store.minOrderAmount.toString(),
+    };
   }
 
   async checkout(actor: Actor, key: string | undefined, dto: CheckoutDto) {
@@ -167,7 +101,7 @@ export class OrdersService {
     const note = dto.note?.trim();
     const requestHash = createHash('sha256').update(`${dto.cartVersion}:${dto.addressId}${paymentMethod === 'CASH' ? '' : `:${paymentMethod}`}${dto.redeemReward ? ':reward' : ''}${note ? `:note:${note}` : ''}`).digest('hex');
     const { order, ownerId } = await this.db.$transaction(async tx => {
-      await this.lockCustomer(tx, customerId);
+      await lockCustomer(tx, customerId);
       const existing = await tx.customerOrder.findUnique({ where: { customerId_idempotencyKey: { customerId, idempotencyKey } } });
       if (existing) {
         if (existing.requestHash !== requestHash) throw new ConflictException('Idempotency key already used for different checkout');
@@ -180,7 +114,7 @@ export class OrdersService {
       if (!items.length) throw new BadRequestException('Cart is empty');
       const address = await tx.deliveryAddress.findFirst({ where: { id: dto.addressId, customerId } });
       if (!address) throw new NotFoundException('Address not found');
-      const { store, snapshots, min, max, requiresQuote } = await this.catalog(tx, items);
+      const { store, snapshots, min, max, requiresQuote } = await priceCart(tx, items);
       if (store.status !== 'ACTIVE' || !store.isOpenNow) throw new ConflictException('Store is not accepting orders');
       if (store.latitude === null || store.longitude === null) throw new ConflictException('موقع المتجر غير محدد. تواصل مع المتجر لتحديث موقعه قبل الطلب.');
       const deliveryDistance = distanceKm(+store.latitude, +store.longitude, +address.latitude, +address.longitude);
@@ -193,10 +127,13 @@ export class OrdersService {
       if (dto.redeemReward && await this.rewardBalance(tx, customerId) < 100) {
         throw new ConflictException('رصيد النقاط لا يكفي لاستخدام الخصم.');
       }
+      const deliveryPricing = calculateDeliveryFee(deliveryDistance, min, store, this.deliveryDefaults());
       const order = await tx.customerOrder.create({ data: {
         customerId, paymentMethod, storeId: store.storeId, idempotencyKey, requestHash, storeName: store.storeName,
         addressSnapshot: { id: address.id, label: address.label, address: address.address, latitude: address.latitude.toString(), longitude: address.longitude.toString(), area: address.area, residenceType: address.residenceType, building: address.building, floor: address.floor, street: address.street, phone: address.phone, directions: address.directions },
         itemSnapshots: snapshots, currency: 'ILS', estimatedMin: min, estimatedMax: max,
+        deliveryDistanceKm: deliveryPricing.distanceKm, deliveryFee: deliveryPricing.deliveryFee,
+        rewardPointsEarned: paymentMethod === 'BANK_TRANSFER' ? 20 : 10,
         minimumAmount: store.minOrderAmount, requiresQuote,
         ...(dto.redeemReward && { rewardPointsUsed: 100, rewardDiscountRate: 5 }),
         events: { create: { actorId: actor.user_id, actorRole: actor.role, version: 1, action: 'checkout', toStatus: 'PENDING', ...(note && { details: { note } }) } },
@@ -212,7 +149,29 @@ export class OrdersService {
   async list(actor: Actor, before?: number) {
     const rows = await this.db.customerOrder.findMany({
       where: { ...this.scope(actor), id: before ? { lt: before } : undefined },
-      include: { store: { select: { logoUrl: true, coverImageUrl: true, storeNameAr: true } } }, orderBy: { id: 'desc' }, take: 51,
+      include: {
+        store: { select: { logoUrl: true, coverImageUrl: true, storeNameAr: true } },
+        payment: actor.role === 'driver'
+          ? false
+          : {
+              select: {
+                status: true,
+                recipientPhone: true,
+                storeCollected: true,
+                receipt: {
+                  select: {
+                    submittedAt: true,
+                    verificationStatus: true,
+                    riskLevel: true,
+                    reportReason: true,
+                    decision: true,
+                  },
+                },
+              },
+            },
+      },
+      orderBy: { id: 'desc' },
+      take: 51,
     });
     const page = rows.slice(0, 50);
     return { orders: page.map(order => this.view(order, actor)), nextBefore: rows.length > 50 ? page[49].id : null };
@@ -223,10 +182,38 @@ export class OrdersService {
       where: { ...this.scope(actor), id },
       include: {
         events: { orderBy: { version: 'asc' } },
-        store: { select: { fullAddressAr: true, fullAddress: true, latitude: true, longitude: true, phone: true } },
-        payment: { select: { status: true } },
+        store: {
+          select: {
+            fullAddressAr: true,
+            fullAddress: true,
+            latitude: true,
+            longitude: true,
+            phone: true,
+            ...(actor.role !== 'driver' && { bankTransferPhone: true }),
+          },
+        },
+        payment: actor.role === 'driver'
+          ? false
+          : {
+              select: {
+                status: true,
+                recipientPhone: true,
+                storeCollected: true,
+                receipt: {
+                  select: {
+                    submittedAt: true,
+                    verificationStatus: true,
+                    riskLevel: true,
+                    reportReason: true,
+                    decision: true,
+                  },
+                },
+              },
+            },
         deliveryCompany: { select: { name: true } },
-        customer: actor.role === 'store_owner' ? { select: { full_name: true, full_name_ar: true, phone: true } } : false,
+        customer: actor.role === 'store_owner' || actor.role === 'admin'
+          ? { select: { user_id: true, full_name: true, full_name_ar: true, phone: true, is_active: true } }
+          : false,
       },
     });
     if (order) {
@@ -298,133 +285,8 @@ export class OrdersService {
         return { value: this.view(order, actor), change: null };
       }
       if (order.version !== dto.version || !rule.from.includes(order.status)) throw new ConflictException('Order changed or action is invalid in this state');
-      let toStatus = rule.to;
-      if ((claim || companyAssign) && order.status === 'ACCEPTED') toStatus = 'ACCEPTED';
-      if (dto.action === OrderAction.READY && order.driverId !== null) toStatus = 'ASSIGNED';
-      if (reroute) toStatus = order.status;
-      const data: Prisma.CustomerOrderUncheckedUpdateManyInput = { status: toStatus, version: { increment: 1 } };
-      const details: Prisma.InputJsonObject = {
-        ...(dto.reason ? { reason: dto.reason } : {}),
-        ...(dto.total !== undefined ? { total: new Prisma.Decimal(dto.total).toFixed(2) } : {}),
-        ...(dto.driverId !== undefined ? { driverId: dto.driverId } : {}),
-        ...(reroute ? { previousDeliveryCompanyId: order.deliveryCompanyId } : {}),
-      };
-      if ([OrderAction.ACCEPT, OrderAction.QUOTE, OrderAction.APPROVE_QUOTE].includes(dto.action)) {
-        const choice = dto.action === OrderAction.APPROVE_QUOTE ? undefined : dto.deliveryCompanyId;
-        const companyId = choice === undefined ? order.deliveryCompanyId : choice;
-        if (companyId !== null && !await this.hasActiveDeliveryContract(tx, order.storeId, companyId, true)) {
-          throw new ConflictException('The selected delivery company is unavailable. A new quote or delivery selection is required.');
-        }
-        if (choice !== undefined) data.deliveryCompanyId = choice;
-      }
-      if (reroute) {
-        if (order.deliveryCompanyId === null || order.driverId !== null) {
-          throw new ConflictException('Only unassigned company deliveries can be rerouted');
-        }
-        data.deliveryCompanyId = null;
-        data.dispatchOpenedAt = order.dispatchOpenedAt ? new Date() : null;
-        data.offeredDriverId = null;
-        data.offerExpiresAt = null;
-      }
-      if (dto.action === OrderAction.ACCEPT) {
-        if (order.requiresQuote) throw new ConflictException('A confirmed quote is required');
-        data.finalTotal = order.estimatedMin;
-      }
-      if (dto.action === OrderAction.QUOTE) {
-        const total = new Prisma.Decimal(dto.total!);
-        if (total.lt(order.minimumAmount)) throw new BadRequestException('Quote is below the store minimum');
-        data.proposedTotal = total;
-      }
-      if (dto.action === OrderAction.APPROVE_QUOTE) data.finalTotal = order.proposedTotal;
-      if (dto.action === OrderAction.ASSIGN) {
-        if (order.offerExpiresAt && order.offerExpiresAt > new Date()) throw new ConflictException('An offer is already active');
-        const driver = await this.finance.assertEligibleDriver(tx, dto.driverId!);
-        if (order.deliveryCompanyId !== null || driver.deliveryCompanyId !== null) throw new ConflictException('Manual offers require an independent driver and order');
-        data.offeredDriverId = dto.driverId;
-        data.offerExpiresAt = new Date(Date.now() + 5 * 60_000);
-      }
-      if (dto.action === OrderAction.ACCEPT_ASSIGNMENT || dto.action === OrderAction.DECLINE_ASSIGNMENT) {
-        if (order.offeredDriverId !== actor.user_id || !order.offerExpiresAt || order.offerExpiresAt <= new Date()) {
-          throw new ConflictException('Assignment offer is unavailable');
-        }
-        if (dto.action === OrderAction.ACCEPT_ASSIGNMENT) {
-          const driver = await this.finance.assertEligibleDriver(tx, actor.user_id);
-          if (driver.deliveryCompanyId !== order.deliveryCompanyId) throw new ConflictException('Driver is no longer eligible for this order');
-          data.driverId = actor.user_id;
-          data.activeDriverId = actor.user_id;
-        }
-        data.offeredDriverId = null;
-        data.offerExpiresAt = null;
-      }
-      if (claim || companyAssign) {
-        if (order.driverId !== null) throw new ConflictException('A driver is already assigned');
-        const driverId = claim ? actor.user_id : dto.driverId!;
-        const driver = await this.finance.assertEligibleDriver(tx, driverId);
-        if (driver.deliveryCompanyId !== order.deliveryCompanyId) throw new ConflictException('Driver is not eligible for this order');
-        if (claim) {
-          const [offer] = await this.dispatch.independentOffers(actor, id, tx);
-          if (!offer?.openOffer.canClaim) throw new ConflictException('Delivery offer is unavailable or reserved for the nearest driver');
-        }
-        data.driverId = driverId;
-        data.activeDriverId = driverId;
-      }
-      if (dto.action === OrderAction.READY) {
-        await this.finance.assertReady(tx, order);
-        if (!order.dispatchOpenedAt) data.dispatchOpenedAt = new Date();
-      }
-      if (dto.action === OrderAction.PICK_UP) {
-        if (order.driverId !== actor.user_id) throw new ForbiddenException('Assigned driver required');
-        data.deliveryNonce = randomUUID();
-        data.deliveryCodeExpiresAt = new Date(Date.now() + 24 * 60 * 60_000);
-      }
-      if (dto.action === OrderAction.RESET_DELIVERY_CODE) {
-        data.deliveryNonce = randomUUID();
-        data.deliveryCodeExpiresAt = new Date(Date.now() + 24 * 60 * 60_000);
-        data.deliveryCodeAttempts = 0;
-      }
-      if (dto.action === OrderAction.DELIVER) {
-        if (order.driverId !== actor.user_id) throw new ForbiddenException('Assigned driver required');
-        if (!order.deliveryNonce || !order.deliveryCodeExpiresAt || order.deliveryCodeExpiresAt <= new Date() || order.deliveryCodeAttempts >= 5) {
-          throw new ConflictException('Delivery code unavailable');
-        }
-        const expected = Buffer.from(this.finance.deliveryCode(order.id, order.deliveryNonce));
-        const received = Buffer.from(dto.deliveryCode ?? '');
-        if (expected.length !== received.length || !timingSafeEqual(expected, received)) {
-          await tx.customerOrder.update({ where: { id }, data: { deliveryCodeAttempts: { increment: 1 } } });
-          return null;
-        }
-        await this.finance.completeDelivery(tx, order, actor.user_id, dto.collectedAmount);
-        await tx.$executeRaw`
-          UPDATE products p
-          JOIN (
-            SELECT item.productId, SUM(item.quantity) AS sold
-            FROM JSON_TABLE(${JSON.stringify(order.itemSnapshots)}, '$[*]' COLUMNS (
-              productId INT PATH '$.productId', quantity INT PATH '$.quantity'
-            )) item WHERE item.quantity > 0 GROUP BY item.productId
-          ) totals ON totals.productId = p.product_id
-          SET p.sold_quantity = p.sold_quantity + totals.sold
-          WHERE p.store_id = ${order.storeId}`;
-        data.activeDriverId = null;
-        data.deliveryNonce = null;
-        data.deliveryCodeExpiresAt = null;
-      }
-      if (dto.action === OrderAction.CANCEL || dto.action === OrderAction.CONFIRM_RETURN) {
-        await this.finance.cancelPayment(tx, id);
-        data.activeDriverId = null;
-        data.deliveryNonce = null;
-        data.deliveryCodeExpiresAt = null;
-        data.offeredDriverId = null;
-        data.offerExpiresAt = null;
-      }
-      if ([OrderAction.ACCEPT, OrderAction.APPROVE_QUOTE].includes(dto.action)) {
-        const total = new Prisma.Decimal(data.finalTotal as Prisma.Decimal);
-        const discount = total.times(order.rewardDiscountRate).div(100).toDecimalPlaces(2);
-        data.rewardDiscount = discount;
-        const payable = total.minus(discount);
-        data.finalTotal = payable;
-        await this.finance.createPayment(tx, order, payable);
-        if (order.paymentMethod === 'CASH') data.dispatchOpenedAt = new Date();
-      }
+      const { toStatus, data, details, delivered } = await this.applyOrderAction(tx, actor, order, dto);
+      if (!delivered) return null;
       const updated = await tx.customerOrder.updateMany({ where: { ...where, version: dto.version }, data }).catch(error => {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw new ConflictException('Driver already has an active delivery');
         throw error;
@@ -455,6 +317,241 @@ export class OrdersService {
     return result.value;
   }
 
+  private async applyOrderAction(
+    tx: Prisma.TransactionClient,
+    actor: Actor,
+    order: CustomerOrder,
+    dto: OrderActionDto,
+  ): Promise<{
+    toStatus: CustomerOrder['status'];
+    data: Prisma.CustomerOrderUncheckedUpdateManyInput;
+    details: Prisma.InputJsonObject;
+    delivered: boolean;
+  }> {
+    const rule = transitions[dto.action];
+    const claim = dto.action === OrderAction.CLAIM_DELIVERY;
+    const companyAssign = dto.action === OrderAction.COMPANY_ASSIGN;
+    const reroute = dto.action === OrderAction.REROUTE_DELIVERY;
+
+    let toStatus = rule.to;
+    if ((claim || companyAssign) && order.status === 'ACCEPTED') toStatus = 'ACCEPTED';
+    if (dto.action === OrderAction.READY && order.driverId !== null) toStatus = 'ASSIGNED';
+    if (reroute) toStatus = order.status;
+
+    const data: Prisma.CustomerOrderUncheckedUpdateManyInput = { status: toStatus, version: { increment: 1 } };
+    const details: Prisma.InputJsonObject = {
+      ...(dto.reason ? { reason: dto.reason } : {}),
+      ...(dto.total !== undefined ? { total: new Prisma.Decimal(dto.total).toFixed(2) } : {}),
+      ...(dto.driverId !== undefined ? { driverId: dto.driverId } : {}),
+      ...(reroute ? { previousDeliveryCompanyId: order.deliveryCompanyId } : {}),
+    };
+
+    if ([OrderAction.ACCEPT, OrderAction.QUOTE, OrderAction.APPROVE_QUOTE].includes(dto.action)) {
+      await this.resolveCompanySelection(tx, order, dto.action, dto.deliveryCompanyId, data);
+    }
+    if (reroute) {
+      if (order.deliveryCompanyId === null || order.driverId !== null) {
+        throw new ConflictException('Only unassigned company deliveries can be rerouted');
+      }
+      data.deliveryCompanyId = null;
+      data.dispatchOpenedAt = order.dispatchOpenedAt ? new Date() : null;
+      data.offeredDriverId = null;
+      data.offerExpiresAt = null;
+    }
+    if (dto.action === OrderAction.ACCEPT) {
+      if (order.requiresQuote) throw new ConflictException('A confirmed quote is required');
+      data.finalTotal = order.estimatedMin;
+    }
+    if (dto.action === OrderAction.QUOTE) {
+      const total = new Prisma.Decimal(dto.total!);
+      if (total.lt(order.minimumAmount)) throw new BadRequestException('Quote is below the store minimum');
+      data.proposedTotal = total;
+      const updatedPricing = await this.recomputeOrderDeliveryFee(tx, order, total);
+      data.deliveryFee = updatedPricing.deliveryFee;
+    }
+    if (dto.action === OrderAction.APPROVE_QUOTE) {
+      const approvedTotal = new Prisma.Decimal(order.proposedTotal!);
+      data.finalTotal = approvedTotal;
+      const updatedPricing = await this.recomputeOrderDeliveryFee(tx, order, approvedTotal);
+      data.deliveryFee = updatedPricing.deliveryFee;
+    }
+
+    await this.applyAssignmentAction(tx, actor, order, dto, data);
+
+    if (dto.action === OrderAction.READY) {
+      await this.finance.assertReady(tx, order);
+      if (!order.dispatchOpenedAt) data.dispatchOpenedAt = new Date();
+    }
+    if (dto.action === OrderAction.PICK_UP) {
+      if (order.driverId !== actor.user_id) throw new ForbiddenException('Assigned driver required');
+      data.deliveryNonce = randomUUID();
+      data.deliveryCodeExpiresAt = new Date(Date.now() + 24 * 60 * 60_000);
+    }
+    if (dto.action === OrderAction.RESET_DELIVERY_CODE) {
+      data.deliveryNonce = randomUUID();
+      data.deliveryCodeExpiresAt = new Date(Date.now() + 24 * 60 * 60_000);
+      data.deliveryCodeAttempts = 0;
+    }
+    if (dto.action === OrderAction.DELIVER) {
+      const verified = await this.handleDeliverAction(tx, actor, order, dto, data);
+      if (!verified) return { toStatus, data, details, delivered: false };
+    }
+    if (dto.action === OrderAction.CANCEL || dto.action === OrderAction.CONFIRM_RETURN) {
+      await this.finance.cancelPayment(tx, order.id);
+      data.activeDriverId = null;
+      data.deliveryNonce = null;
+      data.deliveryCodeExpiresAt = null;
+      data.offeredDriverId = null;
+      data.offerExpiresAt = null;
+    }
+    if ([OrderAction.ACCEPT, OrderAction.APPROVE_QUOTE].includes(dto.action)) {
+      await this.finalizeAcceptedOrder(tx, order, data);
+    }
+
+    return { toStatus, data, details, delivered: true };
+  }
+
+  private async resolveCompanySelection(
+    tx: Prisma.TransactionClient,
+    order: CustomerOrder,
+    action: OrderAction,
+    deliveryCompanyId: number | null | undefined,
+    data: Prisma.CustomerOrderUncheckedUpdateManyInput,
+  ) {
+    const choice = action === OrderAction.APPROVE_QUOTE ? undefined : deliveryCompanyId;
+    const companyId = choice === undefined ? order.deliveryCompanyId : choice;
+    if (companyId !== null && !await this.hasActiveDeliveryContract(tx, order.storeId, companyId, true)) {
+      throw new ConflictException('The selected delivery company is unavailable. A new quote or delivery selection is required.');
+    }
+    if (choice !== undefined) data.deliveryCompanyId = choice;
+  }
+
+  private async applyAssignmentAction(
+    tx: Prisma.TransactionClient,
+    actor: Actor,
+    order: CustomerOrder,
+    dto: OrderActionDto,
+    data: Prisma.CustomerOrderUncheckedUpdateManyInput,
+  ) {
+    if (dto.action === OrderAction.ASSIGN) {
+      if (order.offerExpiresAt && order.offerExpiresAt > new Date()) throw new ConflictException('An offer is already active');
+      const driver = await this.finance.assertEligibleDriver(tx, dto.driverId!);
+      if (order.deliveryCompanyId !== null || driver.deliveryCompanyId !== null) throw new ConflictException('Manual offers require an independent driver and order');
+      data.offeredDriverId = dto.driverId;
+      data.offerExpiresAt = new Date(Date.now() + 5 * 60_000);
+      return;
+    }
+    if (dto.action === OrderAction.ACCEPT_ASSIGNMENT || dto.action === OrderAction.DECLINE_ASSIGNMENT) {
+      if (order.offeredDriverId !== actor.user_id || !order.offerExpiresAt || order.offerExpiresAt <= new Date()) {
+        throw new ConflictException('Assignment offer is unavailable');
+      }
+      if (dto.action === OrderAction.ACCEPT_ASSIGNMENT) {
+        const driver = await this.finance.assertEligibleDriver(tx, actor.user_id);
+        if (driver.deliveryCompanyId !== order.deliveryCompanyId) throw new ConflictException('Driver is no longer eligible for this order');
+        data.driverId = actor.user_id;
+        data.activeDriverId = actor.user_id;
+      }
+      data.offeredDriverId = null;
+      data.offerExpiresAt = null;
+      return;
+    }
+    const claim = dto.action === OrderAction.CLAIM_DELIVERY;
+    const companyAssign = dto.action === OrderAction.COMPANY_ASSIGN;
+    if (claim || companyAssign) {
+      if (order.driverId !== null) throw new ConflictException('A driver is already assigned');
+      const driverId = claim ? actor.user_id : dto.driverId!;
+      const driver = await this.finance.assertEligibleDriver(tx, driverId);
+      if (driver.deliveryCompanyId !== order.deliveryCompanyId) throw new ConflictException('Driver is not eligible for this order');
+      if (claim) {
+        const [offer] = await this.dispatch.independentOffers(actor, order.id, tx);
+        if (!offer?.openOffer.canClaim) throw new ConflictException('Delivery offer is unavailable or reserved for the nearest driver');
+      }
+      data.driverId = driverId;
+      data.activeDriverId = driverId;
+    }
+  }
+
+  private async handleDeliverAction(
+    tx: Prisma.TransactionClient,
+    actor: Actor,
+    order: CustomerOrder,
+    dto: OrderActionDto,
+    data: Prisma.CustomerOrderUncheckedUpdateManyInput,
+  ) {
+    if (order.driverId !== actor.user_id) throw new ForbiddenException('Assigned driver required');
+    if (!order.deliveryNonce || !order.deliveryCodeExpiresAt || order.deliveryCodeExpiresAt <= new Date() || order.deliveryCodeAttempts >= 5) {
+      throw new ConflictException('Delivery code unavailable');
+    }
+    const expected = Buffer.from(this.finance.deliveryCode(order.id, order.deliveryNonce));
+    const received = Buffer.from(dto.deliveryCode ?? '');
+    if (expected.length !== received.length || !timingSafeEqual(expected, received)) {
+      await tx.customerOrder.update({ where: { id: order.id }, data: { deliveryCodeAttempts: { increment: 1 } } });
+      return false;
+    }
+    await this.finance.completeDelivery(tx, order, actor.user_id, dto.collectedAmount);
+    await this.incrementSoldQuantities(tx, order);
+    data.activeDriverId = null;
+    data.deliveryNonce = null;
+    data.deliveryCodeExpiresAt = null;
+    return true;
+  }
+
+  private async incrementSoldQuantities(tx: Prisma.TransactionClient, order: CustomerOrder) {
+    const rawItems = Array.isArray(order.itemSnapshots) ? order.itemSnapshots : [];
+    const productIds = Array.from(new Set(
+      rawItems
+        .map(item => (item && typeof item === 'object' && 'productId' in item ? Number((item as { productId: unknown }).productId) : 0))
+        .filter(productId => Number.isInteger(productId) && productId > 0),
+    )).sort((a, b) => a - b);
+    if (!productIds.length) return;
+    await tx.$queryRaw`
+      SELECT product_id FROM products
+      WHERE store_id = ${order.storeId} AND product_id IN (${Prisma.join(productIds)})
+      ORDER BY product_id ASC FOR UPDATE`;
+    await tx.$executeRaw`
+      UPDATE products p
+      JOIN (
+        SELECT item.productId, SUM(item.quantity) AS sold
+        FROM JSON_TABLE(${JSON.stringify(order.itemSnapshots)}, '$[*]' COLUMNS (
+          productId INT PATH '$.productId', quantity INT PATH '$.quantity'
+        )) item WHERE item.quantity > 0 GROUP BY item.productId
+      ) totals ON totals.productId = p.product_id
+      SET p.sold_quantity = p.sold_quantity + totals.sold
+      WHERE p.store_id = ${order.storeId}`;
+  }
+
+  private async recomputeOrderDeliveryFee(
+    tx: Prisma.TransactionClient,
+    order: Pick<CustomerOrder, 'storeId' | 'deliveryDistanceKm'>,
+    itemsSubtotal: Prisma.Decimal,
+  ) {
+    const store = await tx.store.findUniqueOrThrow({
+      where: { storeId: order.storeId },
+      select: { deliveryBaseFee: true, deliveryPerKmFee: true, freeDeliveryThreshold: true },
+    });
+    return calculateDeliveryFee(Number(order.deliveryDistanceKm ?? 0), itemsSubtotal, store, this.deliveryDefaults());
+  }
+
+  private async finalizeAcceptedOrder(
+    tx: Prisma.TransactionClient,
+    order: CustomerOrder,
+    data: Prisma.CustomerOrderUncheckedUpdateManyInput,
+  ) {
+    const itemsTotal = new Prisma.Decimal(data.finalTotal as Prisma.Decimal);
+    const discount = itemsTotal.times(order.rewardDiscountRate).div(100).toDecimalPlaces(2);
+    data.rewardDiscount = discount;
+    const deliveryFee = data.deliveryFee !== undefined
+      ? new Prisma.Decimal(data.deliveryFee as Prisma.Decimal)
+      : order.deliveryFee;
+    const payable = itemsTotal.minus(discount).plus(deliveryFee);
+    data.finalTotal = payable;
+    const resolvedCompanyId = data.deliveryCompanyId !== undefined
+      ? (data.deliveryCompanyId as number | null)
+      : order.deliveryCompanyId;
+    await this.finance.createPayment(tx, { ...order, deliveryFee }, payable, { deliveryCompanyId: resolvedCompanyId });
+    if (order.paymentMethod === 'CASH') data.dispatchOpenedAt = new Date();
+  }
+
   async getDeliveryCode(actor: Actor, id: number) {
     const order = await this.db.customerOrder.findFirst({ where: { id, customerId: this.customer(actor), status: 'IN_TRANSIT' } });
     if (!order?.deliveryNonce || !order.deliveryCodeExpiresAt || order.deliveryCodeExpiresAt <= new Date()) throw new NotFoundException('Delivery code not available');
@@ -473,53 +570,5 @@ export class OrdersService {
     return Boolean(contract);
   }
 
-  private async lockCustomer(tx: Prisma.TransactionClient, customerId: number) {
-    await tx.$queryRaw`SELECT user_id FROM users WHERE user_id = ${customerId} FOR UPDATE`;
-  }
 
-  private async catalog(tx: Prisma.TransactionClient, items: CartItemDto[]) {
-    const products = await tx.product.findMany({
-      where: { productId: { in: items.map(item => item.productId) } }, include: { productOptions: true, store: true },
-    });
-    const byId = new Map(products.map(product => [product.productId, product]));
-    const store = products[0]?.store;
-    const uniqueLines = new Set<string>();
-    let min = new Prisma.Decimal(0);
-    let max = new Prisma.Decimal(0);
-    let requiresQuote = false;
-    const snapshots = items.map(item => {
-      const product = byId.get(item.productId);
-      if (!product?.isAvailable) throw new ConflictException('A product is unavailable');
-      if (product.storeId !== store.storeId) throw new BadRequestException('Cart must contain products from one store');
-      const lineKey = `${item.productId}:${[...item.optionIds].sort((a, b) => a - b).join(',')}`;
-      if (uniqueLines.has(lineKey)) throw new BadRequestException('Duplicate cart item');
-      uniqueLines.add(lineKey);
-      const options = new Map(product.productOptions.map(option => [option.optionId, option]));
-      let extra = new Prisma.Decimal(0);
-      const selected = item.optionIds.map(id => {
-        const option = options.get(id);
-        if (!option?.isAvailable || option.extraCost.lt(0)) throw new ConflictException('A selected option is unavailable');
-        extra = extra.plus(option.extraCost);
-        return { optionId: id, name: option.optionName, nameAr: option.optionNameAr, extraCost: option.extraCost.toFixed(2) };
-      });
-      if (product.estimatedPriceMin.lt(0) || (!product.isPriceFixed && product.estimatedPriceMax.lt(product.estimatedPriceMin))) {
-        throw new ConflictException('Product price is invalid');
-      }
-      const unitMin = product.estimatedPriceMin.plus(extra);
-      const unitMax = (product.isPriceFixed ? product.estimatedPriceMin : product.estimatedPriceMax).plus(extra);
-      min = min.plus(unitMin.times(item.quantity));
-      max = max.plus(unitMax.times(item.quantity));
-      requiresQuote ||= !product.isPriceFixed;
-      return { productId: item.productId, nameAr: product.nameAr, nameEn: product.nameEn, quantity: item.quantity, unitMin: unitMin.toFixed(2), unitMax: unitMax.toFixed(2), options: selected };
-    });
-    if (max.gt('999999999999.99')) throw new BadRequestException('Order amount exceeds supported limit');
-    return { store, snapshots, min, max, requiresQuote };
-  }
-}
-
-function distanceKm(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const radians = Math.PI / 180;
-  const a = Math.sin((lat2 - lat1) * radians / 2) ** 2 +
-    Math.cos(lat1 * radians) * Math.cos(lat2 * radians) * Math.sin((lon2 - lon1) * radians / 2) ** 2;
-  return 6371 * 2 * Math.asin(Math.min(1, Math.sqrt(a)));
 }

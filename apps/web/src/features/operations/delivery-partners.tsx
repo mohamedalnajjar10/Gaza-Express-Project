@@ -6,7 +6,7 @@ import { Result } from '../../shared/ui/feedback';
 import { ActionForm, Field } from '../../shared/ui/form';
 import { orderLabels } from '../orders/status-labels';
 
-type Company = { id: number; name: string };
+type Company = { id: number; name: string; feePerOrder?: string };
 type Partner = Company & { contract: 'PENDING' | 'CONFIRMED' | null };
 type Queue = {
   company: Company;
@@ -90,15 +90,49 @@ function DeliveryCompanySettings() {
   const [message, setMessage] = useState('');
   return <div className="stack">
     <ActionForm label="تسجيل شركة توصيل" submit={async fields => {
-      await api('/delivery-companies', json('POST', { name: fields.get('name'), managerId: Number(fields.get('managerId')) }));
+      const feeRaw = String(fields.get('feePerOrder') ?? '').trim();
+      await api('/delivery-companies', json('POST', {
+        name: fields.get('name'),
+        managerId: Number(fields.get('managerId')),
+        ...(feeRaw !== '' && { feePerOrder: Number(feeRaw) }),
+      }));
       state.reload();
       setMessage('تم تسجيل الشركة.');
     }}>
       <Field label="اسم شركة التوصيل" name="name" maxLength={160} />
       <Field label="رقم حساب مسؤول الشركة (حساب أعمال موثّق)" name="managerId" type="number" min={1} />
+      <Field label="رسوم المنصة على الطلب (شيكل - اختياري)" name="feePerOrder" type="number" min={0} max={1000} step="0.01" required={false} />
     </ActionForm>
     <Result state={state}>{companies => companies.length ? <>
-      <ul>{companies.map(company => <li key={company.id}>{company.name} · مسؤول الشركة #{company.managerId}</li>)}</ul>
+      <ul className="stack">
+        {companies.map(company => (
+          <li key={company.id} className="surface padded stack">
+            <div>
+              <strong>{company.name}</strong> · مسؤول الشركة #{company.managerId} · رسوم الطلب: {Number(company.feePerOrder ?? 0).toFixed(2)} ₪
+            </div>
+            <ActionForm
+              label="تحديث رسوم الشركة"
+              submit={async fields => {
+                await api(`/delivery-companies/${company.id}`, json('PATCH', {
+                  feePerOrder: Number(fields.get('feePerOrder') ?? 0),
+                }));
+                state.reload();
+                setMessage(`تم تحديث رسوم شركة ${company.name}.`);
+              }}
+            >
+              <Field
+                label="رسوم المنصة لكل طلب (شيكل)"
+                name="feePerOrder"
+                type="number"
+                min={0}
+                max={1000}
+                step="0.01"
+                defaultValue={String(company.feePerOrder ?? '0')}
+              />
+            </ActionForm>
+          </li>
+        ))}
+      </ul>
       <ActionForm label="حفظ تبعية السائق" submit={async fields => {
         const selection = fields.get('deliveryCompanyId');
         await api(`/drivers/${Number(fields.get('driverId'))}/delivery-company`, json('PUT', {

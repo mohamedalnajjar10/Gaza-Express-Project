@@ -33,6 +33,7 @@ model User {
   email             String?        @unique @db.VarChar(255)
   password_hash     String         @db.VarChar(255)
   role              UserRole       @default(customer)
+  pendingSignupRole UserRole?      @map("pending_signup_role")
   avatar            String?
   googleId          String?        @unique
   provider          String         @default("local") 
@@ -137,15 +138,21 @@ model SubCategory {
   @@map("sub_categories")
 }
 
+enum StorePlanTier {
+  FREE
+  PRO
+}
+
 model StoreCategory {
-  categoryId    Int         @id @default(autoincrement())  
-  nameAr        String      @unique
-  nameEn        String?     @unique
-  iconUrl       String?     @map("icon_url")
-  colorHex      String?     @default("#4CAF50") @map("color_hex")
-  sortOrder     Int         @default(0) @map("sort_order")
-  isActive      Boolean     @default(true) @map("is_active")
-  createdAt     DateTime    @default(now()) @map("created_at")
+  categoryId           Int         @id @default(autoincrement())  
+  nameAr               String      @unique
+  nameEn               String?     @unique
+  iconUrl              String?     @map("icon_url")
+  colorHex             String?     @default("#4CAF50") @map("color_hex")
+  sortOrder            Int         @default(0) @map("sort_order")
+  isActive             Boolean     @default(true) @map("is_active")
+  defaultCommissionBps Int?        @map("default_commission_bps")
+  createdAt            DateTime    @default(now()) @map("created_at")
 
   stores        Store[]
   
@@ -153,6 +160,7 @@ model StoreCategory {
 }
 
 model Store {
+  bankTransferPhone String? @db.VarChar(10)
   storeId         Int       @id @default(autoincrement()) @map("store_id") 
   ownerId         Int       @map("owner_id") 
   categoryId      Int       @map("category_id") 
@@ -176,9 +184,14 @@ model Store {
   closesAt        String?   @default("22:00:00") @map("closes_at")
   workingDays     String?   @default("saturday,sunday,monday,tuesday,wednesday,thursday") @map("working_days")
   
-  minOrderAmount  Decimal   @default(0) @map("min_order_amount") @db.Decimal(8, 2)
-  estimatedPrepMin Int      @default(30) @map("estimated_prep_min")
-  deliveryRangeKm Decimal   @default(10) @map("delivery_range_km") @db.Decimal(5, 2)
+  minOrderAmount        Decimal       @default(0) @map("min_order_amount") @db.Decimal(8, 2)
+  estimatedPrepMin      Int           @default(30) @map("estimated_prep_min")
+  deliveryRangeKm       Decimal       @default(10) @map("delivery_range_km") @db.Decimal(5, 2)
+  planTier              StorePlanTier @default(FREE) @map("plan_tier")
+  commissionBps         Int?          @map("commission_bps")
+  deliveryBaseFee       Decimal?      @map("delivery_base_fee") @db.Decimal(8, 2)
+  deliveryPerKmFee      Decimal?      @map("delivery_per_km_fee") @db.Decimal(8, 2)
+  freeDeliveryThreshold Decimal?      @map("free_delivery_threshold") @db.Decimal(8, 2)
   
   status          StoreStatus @default(PENDING_APPROVAL)
   isOpenNow       Boolean   @default(true) @map("is_open_now")
@@ -200,6 +213,10 @@ model Store {
   @@index([categoryId])
   @@index([status])
   @@index([status, avgRating(sort: Desc), storeId])
+  @@index([status, avgRating])
+  @@index([status, estimatedPrepMin])
+  @@index([status, createdAt])
+  @@index([status, categoryId, areaId])
   orders CustomerOrder[]
   moderationEvents StoreModerationEvent[]
   deliveryContracts StoreDeliveryContract[]
@@ -405,7 +422,10 @@ model CustomerOrder {
   minimumAmount Decimal @db.Decimal(14, 2)
   proposedTotal Decimal? @db.Decimal(14, 2)
   finalTotal Decimal? @db.Decimal(14, 2)
+  deliveryDistanceKm Decimal? @db.Decimal(8, 2)
+  deliveryFee Decimal @default(0) @db.Decimal(14, 2)
   rewardPointsUsed Int @default(0)
+  rewardPointsEarned Int @default(10)
   rewardDiscountRate Int @default(0)
   rewardDiscount Decimal @default(0) @db.Decimal(14, 2)
   requiresQuote Boolean
@@ -422,6 +442,7 @@ model CustomerOrder {
   @@index([storeId, id])
   @@index([driverId, id])
   @@index([customerId, status])
+  @@index([offeredDriverId, offerExpiresAt])
   @@index([deliveryCompanyId, driverId, status, dispatchOpenedAt], map: "customer_orders_dispatch_idx")
   @@map("customer_orders")
 }
@@ -479,6 +500,7 @@ model DriverProfile {
 model DeliveryCompany {
   id Int @id @default(autoincrement())
   name String @db.VarChar(160)
+  feePerOrder Decimal @default(0) @db.Decimal(8, 2)
   managerId Int @unique
   manager User @relation(fields: [managerId], references: [user_id], onDelete: Restrict)
   drivers DriverProfile[]
@@ -507,6 +529,9 @@ model Payment {
   status PaymentStatus @default(DUE)
   amount Decimal @db.Decimal(14, 2)
   currency String @db.Char(3)
+  recipientPhone String? @db.VarChar(10)
+  storeCollected Boolean @default(false)
+  receipt BankReceipt?
   bankCode String? @unique @db.VarChar(36)
   bankReference String? @unique @db.VarChar(100)
   whatsappMessageId String? @unique @db.VarChar(191)
@@ -515,12 +540,47 @@ model Payment {
   collectedAt DateTime?
   cashHandedOverAt DateTime?
   cashHandedOverBy Int?
+  commissionBpsApplied Int @default(0)
+  deliveryFee Decimal @default(0) @db.Decimal(14, 2)
+  companyFeeApplied Decimal @default(0) @db.Decimal(14, 2)
   storeShare Decimal @db.Decimal(14, 2)
   driverShare Decimal @db.Decimal(14, 2)
   platformShare Decimal @db.Decimal(14, 2)
   entries PaymentEntry[]
 
   @@map("payments")
+}
+
+model BankReceipt {
+  orderId            Int       @id
+  payment            Payment   @relation(fields: [orderId], references: [orderId], onDelete: Cascade, map: "bank_receipt_payment_fk")
+  image              Bytes     @db.MediumBlob
+  rawSha256          String?   @db.Char(64)
+  perceptualHash     String?   @db.Char(16)
+  imageWidth         Int?
+  imageHeight        Int?
+  originalFormat     String?   @db.VarChar(16)
+  transferReference  String?   @db.VarChar(100)
+  senderPhone        String?   @db.VarChar(20)
+  verificationStatus String    @default("AUTO_CHECKED") @db.VarChar(32)
+  riskLevel          String    @default("LOW") @db.VarChar(16)
+  riskScore          Int       @default(0)
+  forensicReport     Json?
+  submittedAt        DateTime  @default(now())
+  reportReason       String?   @db.VarChar(500)
+  reportedBy         Int?
+  reportedAt         DateTime?
+  reviewedBy         Int?
+  reviewedAt         DateTime?
+  decision           String?   @db.VarChar(12)
+  reviewNote         String?   @db.VarChar(500)
+
+  @@index([rawSha256])
+  @@index([perceptualHash])
+  @@index([transferReference])
+  @@index([verificationStatus, submittedAt])
+  @@index([decision, reportedAt])
+  @@map("bank_receipts")
 }
 
 model PaymentEntry {

@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsBoolean, IsInt, Min, MinLength, MaxLength } from 'class-validator';
+import { IsString, IsOptional, IsBoolean, IsInt, Min, MinLength, MaxLength, ValidateIf } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
@@ -42,27 +42,27 @@ export class CreateProductCategoryDto {
 
 export class UpdateProductCategoryDto {
     @ApiPropertyOptional({ example: 'ألبان', description: 'الاسم بالعربية' })
+    @ValidateIf((_, value) => value !== undefined)
     @IsString()
-    @IsOptional()
     @MinLength(2)
     @MaxLength(191)
     nameAr?: string;
 
-    @ApiPropertyOptional({ example: 'Dairy', description: 'الاسم بالإنجليزية' })
+    @ApiPropertyOptional({ nullable: true, example: 'Dairy', description: 'الاسم بالإنجليزية' })
+    @ValidateIf((_, value) => value !== undefined && value !== null)
     @IsString()
-    @IsOptional()
     @MaxLength(191)
-    nameEn?: string;
+    nameEn?: string | null;
 
     @ApiPropertyOptional({ example: 0 })
+    @ValidateIf((_, value) => value !== undefined)
     @Type(() => Number)
     @IsInt()
     @Min(0)
-    @IsOptional()
     sortOrder?: number;
 
     @ApiPropertyOptional()
+    @ValidateIf((_, value) => value !== undefined)
     @IsBoolean()
-    @IsOptional()
     isActive?: boolean;
 }

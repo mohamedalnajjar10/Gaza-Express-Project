@@ -4,11 +4,17 @@ export type ManagedStore = Store & {
   status: string;
   areaId: number;
   categoryId: number;
+  phone?: string | null;
   fullAddressAr?: string | null;
   fullAddress?: string | null;
   latitude?: string | number | null;
   longitude?: string | number | null;
   deliveryRangeKm?: string | number;
+  planTier?: 'FREE' | 'PRO';
+  commissionBps?: number | null;
+  deliveryBaseFee?: string | number | null;
+  deliveryPerKmFee?: string | number | null;
+  freeDeliveryThreshold?: string | number | null;
 };
 export const storeStatuses: Record<string, string> = {
   PENDING_APPROVAL: 'بانتظار المراجعة',

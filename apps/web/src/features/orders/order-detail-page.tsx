@@ -1,21 +1,43 @@
+import { BankPayment } from './bank-payment';
 import { useState } from 'react';
+import { Check, Copy } from 'lucide-react';
 import { Link, useLocation, useParams } from 'react-router-dom';
-import { ApiError, api } from '../../shared/api/client';
+import { api } from '../../shared/api/client';
 import { type Order } from './types';
 import { OrderActions } from './order-actions';
 import { orderLabels } from './status-labels';
 import { useIdentity } from '../../shared/auth/identity';
 import { money } from '../../shared/lib/money';
 import { Result, Title } from '../../shared/ui/feedback';
-import { ActionForm } from '../../shared/ui/form';
 import { useResource } from '../../shared/hooks/use-resource';
 import { usePolling } from '../../shared/hooks/use-polling';
 import { useOrderUpdates } from './use-order-updates';
 import { DriverTracking } from './driver-tracking';
-import { DriverLocationControl } from '../operations/driver-location';
+import { DriverLocationControl } from '../driver/driver-location';
 
 const paymentLabels: Record<string, string> = {
   CASH: 'الدفع عند الاستلام', BANK_TRANSFER: 'تحويل بنكي', ELECTRONIC: 'دفع إلكتروني',
+};
+
+const eventActionLabels: Record<string, string> = {
+  checkout: 'تم إرسال الطلب',
+  accept: 'قبول المتجر للطلب',
+  quote: 'إرسال عرض السعر',
+  approve_quote: 'موافقة العميل على السعر',
+  reject: 'رفض المتجر للطلب',
+  cancel: 'إلغاء الطلب',
+  ready: 'الطلب جاهز للاستلام',
+  assign: 'عرض الطلب على سائق',
+  accept_assignment: 'قبول السائق للتوصيل',
+  decline_assignment: 'اعتذار السائق عن العرض',
+  claim_delivery: 'استلام السائق لمهمة التوصيل',
+  company_assign: 'إسناد الطلب لسائق شركة التوصيل',
+  reroute_delivery: 'تحويل الطلب إلى التوصيل المستقل',
+  pick_up: 'استلم السائق الطلب من المتجر',
+  deliver: 'تم تسليم الطلب للعميل',
+  report_delivery_issue: 'بلاغ عن مشكلة في التوصيل',
+  reset_delivery_code: 'إصدار رمز تسليم جديد',
+  confirm_return: 'تأكيد إرجاع الطلب إلى المتجر',
 };
 
 export default function OrderDetail() {
@@ -82,13 +104,26 @@ export default function OrderDetail() {
                   order.currency,
                 )}
               </strong>}
+              {(Number(order.deliveryFee ?? 0) > 0 || order.deliveryDistanceKm != null) && (
+                <p>
+                  رسوم التوصيل{order.deliveryDistanceKm ? ` (${order.deliveryDistanceKm} كم)` : ''}:{' '}
+                  {Number(order.deliveryFee ?? 0) > 0 ? money(order.deliveryFee!, order.currency) : 'توصيل مجاني'}
+                </p>
+              )}
               {Number(order.rewardDiscount) > 0 && <p>خصم المكافآت: {money(order.rewardDiscount!, order.currency)}</p>}
-              {!order.finalTotal && !!order.rewardDiscountRate && ['PENDING', 'QUOTED'].includes(order.status) && <p>سيُطبّق خصم المكافآت ({order.rewardDiscountRate}٪) بعد تأكيد السعر.</p>}
+              {!order.finalTotal && !!order.rewardDiscountRate && ['PENDING', 'QUOTED'].includes(order.status) && <p>سيُطبّق خصم المكافآت ({order.rewardDiscountRate}٪) على المنتجات بعد تأكيد السعر.</p>}
+              {profile?.role === 'customer' && !order.offerOnly && order.rewardPointsEarned && !['CANCELLED', 'REJECTED'].includes(order.status) && (
+                <small>
+                  {order.status === 'DELIVERED'
+                    ? `تمت إضافة ${order.rewardPointsEarned} نقطة ولاء لهذا الطلب.`
+                    : `ستكسب ${order.rewardPointsEarned} نقطة ولاء${order.rewardPointsEarned > 10 ? ' (ضعف النقاط — بنك فلسطين)' : ''} عند التسليم.`}
+                </small>
+              )}
               {order.events?.length ? (
                 <ol className="timeline">
                   {order.events.map(event => (
                     <li key={event.id}>
-                      {event.action === 'reroute_delivery' ? 'تحويل الطلب إلى التوصيل المستقل' : orderLabels[event.toStatus] ?? event.toStatus}
+                      {(event.action && eventActionLabels[event.action]) ?? orderLabels[event.toStatus] ?? event.toStatus}
                       <small>
                         {new Date(event.createdAt).toLocaleString('ar-PS')}
                       </small>
@@ -117,7 +152,15 @@ export default function OrderDetail() {
                   <DeliveryCode id={order.id} />
                 )}{' '}
               {order.paymentMethod === 'BANK_TRANSFER' &&
-                profile?.role === 'customer' && <BankPayment key={`${order.id}:${order.version}:${order.status}:${order.payment?.status}`} id={order.id} />}
+                profile && !order.companyView && ['customer','store_owner'].includes(profile.role) && (
+                  <BankPayment
+                    role={profile.role}
+                    order={order}
+                    key={`${order.id}:${order.version}:${order.status}:${order.payment?.status}`}
+                    id={order.id}
+                    onConfirmed={state.reload}
+                  />
+                )}
             </div>
           </div>
         </>
@@ -126,66 +169,42 @@ export default function OrderDetail() {
   );
 }
 function DeliveryCode({ id }: { id: number }) {
-  const [code, setCode] = useState('');
+  const [copied, setCopied] = useState(false);
+  const codeState = useResource(
+    signal => api<{ code: string }>(`/orders/${id}/delivery-code`, { signal }),
+    `delivery-code:${id}`,
+  );
+  const code = codeState.data?.code ?? '';
   return (
-    <div className="surface padded">
+    <div className="surface padded stack">
       <h2>رمز التسليم</h2>
       <p>أعطِ الرمز للسائق عند استلام الطلب.</p>
-      <ActionForm
-        label="عرض الرمز"
-        submit={async () =>
-          setCode(
-            (await api<{ code: string }>(`/orders/${id}/delivery-code`)).code,
-          )
-        }
-      />
       {code && (
-        <output className="delivery-code" dir="ltr">
-          {code}
-        </output>
+        <div className="bop-detail-row">
+          <output className="delivery-code" dir="ltr">
+            {code}
+          </output>
+          <button
+            type="button"
+            className="secondary copy-pill"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(code);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              } catch { /* clipboard unavailable */ }
+            }}
+          >
+            {copied ? <><Check size={14} aria-hidden="true" /> تم النسخ</> : <><Copy size={14} aria-hidden="true" /> نسخ الرمز</>}
+          </button>
+        </div>
       )}
+      <button type="button" className="secondary" onClick={codeState.reload}>
+        عرض الرمز
+      </button>
     </div>
   );
 }
-function BankPayment({ id }: { id: number }) {
-  const state = useResource(
-    signal =>
-      api<{
-        status: string;
-        bankInstructions?: string;
-        whatsappText?: string;
-        whatsappReceived?: boolean;
-      }>(`/orders/${id}/payment`, { signal }).catch(e => {
-        if (e instanceof ApiError && e.status === 404) return null;
-        throw e;
-      }),
-    `payment:${id}`,
-  );
-  return (
-    <Result state={state}>
-      {value =>
-        value ? (
-          <div className="surface padded">
-            <h2>التحويل البنكي</h2>
-            <p>
-              {value.status === 'VOID' ? 'أُلغي الدفع لهذا الطلب' : value.status === 'REFUND_REQUIRED' ? 'المبلغ بانتظار الاسترداد' : value.status === 'REFUNDED' ? 'تم تسجيل استرداد المبلغ' : value.status === 'PAID'
-                ? 'تم تأكيد الدفع'
-                : value.whatsappReceived
-                  ? 'وصل الإشعار، بانتظار مطابقة البنك'
-                  : 'بانتظار التحويل والتحقق'}
-            </p>
-            {value.bankInstructions && <p>{value.bankInstructions}</p>}
-            {value.whatsappText && <p dir="ltr">{value.whatsappText}</p>}
-            <button className="secondary" onClick={state.reload}>
-              تحديث حالة الدفع
-            </button>
-          </div>
-        ) : null
-      }
-    </Result>
-  );
-}
-
 function Location({ title, address, phone, directions, latitude, longitude, area, street, building, floor }: { title: string; address?: string | null; phone?: string | null; directions?: string | null; latitude?: string | number | null; longitude?: string | number | null; area?: string | null; street?: string | null; building?: string | null; floor?: string | null }) {
   const located = latitude != null && longitude != null && Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude));
   const details = [area, street, building, floor && `الطابق ${floor}`].filter(Boolean).join('، ');

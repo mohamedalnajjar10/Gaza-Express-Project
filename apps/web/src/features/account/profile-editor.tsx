@@ -3,7 +3,7 @@ import { Camera, Save, X } from 'lucide-react';
 import { useIdentity } from '../../shared/auth/identity';
 import { ApiError } from '../../shared/api/client';
 import { ErrorBox } from '../../shared/ui/feedback';
-import { AccountAvatar } from './account-avatar';
+import { AccountAvatar } from '../../shared/ui/account-avatar';
 
 export function ProfileEditor({
   onSaved,
@@ -151,15 +151,7 @@ export function ProfileEditor({
             maxLength={255}
           />
         </label>
-        {error ? (
-          error instanceof ApiError && error.status === 409 ? (
-            <p className="error" role="alert">
-              {error.message}
-            </p>
-          ) : (
-            <ErrorBox error={error} />
-          )
-        ) : null}
+        {error ? <ErrorBox error={error} /> : null}
         <div className="account-edit-actions">
           <button type="submit">
             <Save size={17} aria-hidden="true" />

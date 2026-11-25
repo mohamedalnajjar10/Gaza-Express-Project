@@ -2,7 +2,13 @@ import { test, expect } from '@playwright/test';
 
 test('merchant filters stores products and orders with responsive layout', async ({
   page,
+  browserName,
 }, info) => {
+  const capture = async (name: string) => {
+    if (browserName === 'chromium') {
+      await page.screenshot({ path: info.outputPath(name), fullPage: true });
+    }
+  };
   const errors: string[] = [];
   const storeUpdates: Record<string, unknown>[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
@@ -90,10 +96,7 @@ test('merchant filters stores products and orders with responsive layout', async
   await expect(
     page.getByRole('heading', { name: 'سوبر ماركت الرمال', exact: true }),
   ).toBeVisible();
-  await page.screenshot({
-    path: info.outputPath('merchant-dashboard.png'),
-    fullPage: true,
-  });
+  await capture('merchant-dashboard.png');
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(page.viewportSize()!.width);
@@ -128,10 +131,7 @@ test('merchant filters stores products and orders with responsive layout', async
   expect(fields.indexOf('areaId')).toBeLessThan(
     fields.indexOf('fullAddressAr'),
   );
-  await page.screenshot({
-    path: info.outputPath('merchant-form.png'),
-    fullPage: true,
-  });
+  await capture('merchant-form.png');
   await page.getByText('إضافة متجر', { exact: true }).click();
   await page
     .getByRole('button', { name: 'إدارة المنتجات', exact: true })
@@ -144,10 +144,7 @@ test('merchant filters stores products and orders with responsive layout', async
     page.getByRole('heading', { name: 'كعك بالسمسم' }),
   ).toBeVisible();
   await page.getByLabel('التوفر', { exact: true }).selectOption('all');
-  await page.screenshot({
-    path: info.outputPath('merchant-products.png'),
-    fullPage: true,
-  });
+  await capture('merchant-products.png');
   await page
     .getByRole('navigation')
     .getByRole('link', { name: 'طلبات متاجري' })
@@ -158,10 +155,7 @@ test('merchant filters stores products and orders with responsive layout', async
     .selectOption('DELIVERED');
   await expect(page.getByText('طلب #51', { exact: true })).toHaveCount(0);
   await expect(page.getByText('طلب #52', { exact: true })).toBeVisible();
-  await page.screenshot({
-    path: info.outputPath('merchant-orders.png'),
-    fullPage: true,
-  });
+  await capture('merchant-orders.png');
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(page.viewportSize()!.width);

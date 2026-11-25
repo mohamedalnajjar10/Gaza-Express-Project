@@ -8,7 +8,7 @@ import { Prisma, User, UserRole } from '@prisma/client';
 import { PrismaService } from 'prisma/prisma.service';
 import { AUTH_CONSTANTS } from '../auth/constants/auth.constants';
 
-export type UserPayload = Omit<User, 'password_hash' | 'sessionVersion'>;
+export type UserPayload = Omit<User, 'password_hash' | 'sessionVersion' | 'pendingSignupRole'>;
 
 @Injectable()
 export class UserService {
@@ -148,12 +148,17 @@ export class UserService {
       updateData.language_pref = updateUserDto.language_pref;
     }
     if (updateUserDto.is_verified !== undefined) updateData.is_verified = updateUserDto.is_verified;
+    if (updateUserDto.is_active !== undefined) updateData.is_active = updateUserDto.is_active;
     if (Object.keys(updateData).length === 0) {
       throw new BadRequestException('No data to update');
     }
 
     try {
-      const revokeSessions = updateData.password_hash !== undefined || updateData.role !== undefined || updateData.is_verified !== undefined;
+      const revokeSessions =
+        updateData.password_hash !== undefined ||
+        updateData.role !== undefined ||
+        updateData.is_verified !== undefined ||
+        updateData.is_active === false;
       const updatedUser = await this.prisma.user.update({
         where: { user_id: id },
         data: {
@@ -192,7 +197,7 @@ export class UserService {
   }
 
   private mapToPublic(user: User): UserPayload {
-    const { password_hash, sessionVersion, ...result } = user;
+    const { password_hash, sessionVersion, pendingSignupRole, ...result } = user;
     return result;
   }
 

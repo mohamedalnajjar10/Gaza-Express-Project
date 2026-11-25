@@ -9,8 +9,12 @@ import {
 } from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
+import { CreateProductOptionDto, UpdateProductOptionDto } from './dto/product-option.dto';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard } from 'src/common/guards/jwt-auth.guard';
+import { RolesGuard } from 'src/common/guards/roles.guard';
+import { Roles } from 'src/common/decorators/roles.decorator';
+import { UserRole } from '@prisma/client';
 import { ProductImageInterceptor } from './product-image.interceptor';
 
 @ApiTags('Products')
@@ -49,6 +53,46 @@ export class ProductsController {
   @UseGuards(JwtAuthGuard)
   options(@Param('id', ParseIntPipe) id: number, @Query() page: PageDto, @Request() req: AuthenticatedRequest) {
     return this.service.findOptions(id, page, req.user.user_id);
+  }
+
+  @Post(':id/options')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.store_owner, UserRole.admin)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Create product option (store owner or admin)' })
+  createOption(
+    @Request() req: AuthenticatedRequest,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateProductOptionDto,
+  ) {
+    return this.service.createOption(req.user, id, dto);
+  }
+
+  @Patch(':id/options/:optionId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.store_owner, UserRole.admin)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Update product option (store owner or admin)' })
+  updateOption(
+    @Request() req: AuthenticatedRequest,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('optionId', ParseIntPipe) optionId: number,
+    @Body() dto: UpdateProductOptionDto,
+  ) {
+    return this.service.updateOption(req.user, id, optionId, dto);
+  }
+
+  @Delete(':id/options/:optionId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.store_owner, UserRole.admin)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Delete product option (store owner or admin)' })
+  deleteOption(
+    @Request() req: AuthenticatedRequest,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('optionId', ParseIntPipe) optionId: number,
+  ) {
+    return this.service.deleteOption(req.user, id, optionId);
   }
 
   @Get(':id')

@@ -2,7 +2,7 @@ import { PaymentMethod } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   IsIn,
-  ArrayMaxSize, ArrayUnique, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsString,
+  ArrayMaxSize, ArrayUnique, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsString,
   Matches, Max, MaxLength, Min, ValidateBy, ValidateIf, ValidateNested,
 } from 'class-validator';
 
@@ -103,6 +103,35 @@ export class DeliveryCompanyDto {
 
   @IsInt() @Min(1) @Max(2147483647)
   managerId: number;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(1000)
+  feePerOrder?: number;
+}
+
+export class UpdateDeliveryCompanyDto {
+  @IsOptional()
+  @IsString() @Matches(/\S/) @MaxLength(160)
+  name?: string;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(1000)
+  feePerOrder?: number;
+}
+
+export class DeliveryQuoteDto {
+  @Type(() => Number)
+  @IsInt() @Min(1) @Max(2147483647)
+  storeId: number;
+
+  @Type(() => Number)
+  @IsInt() @Min(1) @Max(2147483647)
+  addressId: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(999999999999.99)
+  itemsSubtotal?: number;
 }
 
 export class DriverCompanyDto {

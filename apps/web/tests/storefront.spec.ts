@@ -72,10 +72,12 @@ test('customer searches, adds a product, checks out and cancels', async ({page})
   await page.goto('/stores/1');
   await expect(page).toHaveURL(/\/login$/);
   expect(catalogRequests).toBe(0);
-  await signIn(page, '/addresses');
+  await signIn(page, '/');
   await expect(page).toHaveURL(/\/$/);
   await expect(page.locator('html')).toHaveAttribute('dir','rtl');
-  await expect(page.getByRole('navigation', {name:'التنقل الرئيسي'})).toBeVisible();
+  const isMobile = (page.viewportSize()?.width ?? 1280) <= 640;
+  await expect(page.getByRole('navigation', {name: isMobile ? 'التنقل السريع' : 'التنقل الرئيسي'})).toBeVisible();
+  if (isMobile) await expect(page.getByRole('navigation', {name:'التنقل الرئيسي'})).toBeHidden();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
   await page.getByRole('searchbox').or(page.getByLabel('ابحث عن متجر')).fill('متجر');
   await page.getByRole('button',{name:'بحث',exact:true}).click();
@@ -144,65 +146,70 @@ test('driver completes delivery with code and collected amount', async ({page}) 
   await expect(page.getByText('تم التسليم',{exact:true})).toBeVisible();
 });
 
-test('admin adds the first store category and owner submits a store', async ({ page, context }) => {
-  const ownerPage = await context.newPage();
-  const categories: { categoryId: number; nameAr: string }[] = [];
-  const stores: object[] = [];
-  async function mock(route: Route, role: string) {
-    const request = route.request();
-    const path = new URL(request.url()).pathname.replace('/api/v1', '');
-    if (path === '/auth/login') return success(route, { tokens });
-    if (path === '/auth/profile') return success(route, { user_id: 10, role });
-    if (path === '/delivery-companies/me/queue') return success(route, null);
-    if (path === '/stores/moderation' || path === '/stores/my-stores') return success(route, stores);
-    if (path === '/store-categories') {
-      if (request.method() === 'POST') {
-        expect(role).toBe('admin');
-        expect(request.postDataJSON()).toEqual({ nameAr: 'مطاعم' });
-        categories.push({ categoryId: 1, nameAr: 'مطاعم' });
+test('admin adds the first store category and owner submits a store', async ({ page, browser }) => {
+  const ownerContext = await browser.newContext();
+  try {
+    const ownerPage = await ownerContext.newPage();
+    const categories: { categoryId: number; nameAr: string }[] = [];
+    const stores: object[] = [];
+    async function mock(route: Route, role: string) {
+      const request = route.request();
+      const path = new URL(request.url()).pathname.replace('/api/v1', '');
+      if (path === '/auth/login') return success(route, { tokens });
+      if (path === '/auth/profile') return success(route, { user_id: 10, role });
+      if (path === '/delivery-companies/me/queue') return success(route, null);
+      if (path === '/stores/moderation' || path === '/stores/my-stores') return success(route, stores);
+      if (path === '/store-categories') {
+        if (request.method() === 'POST') {
+          expect(role).toBe('admin');
+          expect(request.postDataJSON()).toEqual({ nameAr: 'مطاعم' });
+          categories.push({ categoryId: 1, nameAr: 'مطاعم' });
+        }
+        return success(route, categories);
       }
-      return success(route, categories);
+      if (path === '/stores' && request.method() === 'POST') {
+        expect(role).toBe('store_owner');
+        expect(request.postDataJSON()).toMatchObject({ categoryId: 1, areaId: 5, fullAddressAr: 'شارع السوق بجوار المخبز' });
+        expect(request.postDataJSON()).toMatchObject({ latitude: 31.5, longitude: 34.4, deliveryRangeKm: 10 });
+        stores.push({ ...request.postDataJSON(), storeId: 1, status: 'PENDING_APPROVAL', isOpenNow: true });
+        return success(route, stores[0]);
+      }
+      throw new Error(`Unexpected ${request.method()} ${path}`);
     }
-    if (path === '/stores' && request.method() === 'POST') {
-      expect(role).toBe('store_owner');
-      expect(request.postDataJSON()).toMatchObject({ categoryId: 1, areaId: 5, fullAddressAr: 'شارع السوق بجوار المخبز' });
-      expect(request.postDataJSON()).toMatchObject({ latitude: 31.5, longitude: 34.4, deliveryRangeKm: 10 });
-      stores.push({ ...request.postDataJSON(), storeId: 1, status: 'PENDING_APPROVAL', isOpenNow: true });
-      return success(route, stores[0]);
-    }
-    throw new Error(`Unexpected ${request.method()} ${path}`);
+    await ownerPage.route('**/api/v1/**', route => mock(route, 'store_owner'));
+    await signIn(ownerPage, '/operations');
+    await ownerPage.getByText('إضافة متجر', { exact: true }).click();
+    await expect(ownerPage.getByRole('button', { name: 'تحديث التصنيفات' })).toBeVisible();
+    await page.route('**/api/v1/**', route => mock(route, 'admin'));
+    await signIn(page, '/login');
+    await expect(page).toHaveURL(/\/operations$/);
+    await expect(page.getByRole('navigation', {name:'تنقل لوحة الإدارة'})).toBeVisible();
+    await page.getByRole('link', { name: 'تصنيفات المتاجر' }).click();
+    await expect(page).toHaveURL(/tab=categories$/);
+    await expect(page.getByRole('link', { name: 'تصنيفات المتاجر' })).toHaveAttribute('aria-current', 'page');
+    await page.getByLabel('اسم التصنيف بالعربية').fill('مطاعم');
+    await page.getByRole('button', { name: 'حفظ التصنيف' }).click();
+    await expect(page.getByRole('status')).toHaveText('تم حفظ التصنيف «مطاعم».');
+    await ownerPage.getByRole('button', { name: 'تحديث التصنيفات' }).click();
+    await ownerPage.getByLabel('اسم المتجر بالعربية').fill('متجر تجريبي');
+    await ownerPage.getByLabel('اسم المتجر بالإنجليزية').fill('Test store');
+    await expect(ownerPage.getByLabel('رقم المنطقة')).toHaveCount(0);
+    await ownerPage.getByLabel('خط العرض للمتجر', { exact: true }).fill('31.5');
+    await ownerPage.getByLabel('خط الطول للمتجر', { exact: true }).fill('34.4');
+    await expect(ownerPage.getByLabel('المحافظة').locator('option')).toHaveText([
+      'اختر المحافظة', 'غزة', 'خانيونس', 'رفح', 'دير البلح', 'النصيرات', 'المغازي', 'جباليا',
+    ]);
+    await ownerPage.getByLabel('العنوان', { exact: true }).fill('شارع السوق بجوار المخبز');
+    await ownerPage.getByLabel('المحافظة').selectOption({ label: 'النصيرات' });
+    await ownerPage.getByRole('button', { name: 'حفظ المتجر' }).click();
+    await expect(ownerPage.getByRole('heading', { name: 'متجر تجريبي' })).toBeVisible();
+    await ownerPage.getByText('تعديل بيانات المتجر', { exact: true }).click();
+    const editForm = ownerPage.locator('article');
+    await expect(editForm.getByLabel('العنوان', { exact: true })).toHaveValue('شارع السوق بجوار المخبز');
+    await expect(editForm.getByLabel('المحافظة')).toHaveValue('5');
+  } finally {
+    await ownerContext.close();
   }
-  await ownerPage.route('**/api/v1/**', route => mock(route, 'store_owner'));
-  await signIn(ownerPage, '/operations');
-  await ownerPage.getByText('إضافة متجر', { exact: true }).click();
-  await expect(ownerPage.getByRole('button', { name: 'تحديث التصنيفات' })).toBeVisible();
-  await page.route('**/api/v1/**', route => mock(route, 'admin'));
-  await signIn(page, '/login');
-  await expect(page).toHaveURL(/\/operations$/);
-  await expect(page.getByRole('navigation', {name:'تنقل لوحة الإدارة'})).toBeVisible();
-  await page.getByRole('link', { name: 'تصنيفات المتاجر' }).click();
-  await expect(page).toHaveURL(/tab=categories$/);
-  await expect(page.getByRole('link', { name: 'تصنيفات المتاجر' })).toHaveAttribute('aria-current', 'page');
-  await page.getByLabel('اسم التصنيف بالعربية').fill('مطاعم');
-  await page.getByRole('button', { name: 'حفظ التصنيف' }).click();
-  await expect(page.getByRole('status')).toHaveText('تم حفظ التصنيف «مطاعم».');
-  await ownerPage.getByRole('button', { name: 'تحديث التصنيفات' }).click();
-  await ownerPage.getByLabel('اسم المتجر بالعربية').fill('متجر تجريبي');
-  await ownerPage.getByLabel('اسم المتجر بالإنجليزية').fill('Test store');
-  await expect(ownerPage.getByLabel('رقم المنطقة')).toHaveCount(0);
-  await ownerPage.getByLabel('خط العرض للمتجر', { exact: true }).fill('31.5');
-  await ownerPage.getByLabel('خط الطول للمتجر', { exact: true }).fill('34.4');
-  await expect(ownerPage.getByLabel('المحافظة').locator('option')).toHaveText([
-    'اختر المحافظة', 'غزة', 'خانيونس', 'رفح', 'دير البلح', 'النصيرات', 'المغازي', 'جباليا',
-  ]);
-  await ownerPage.getByLabel('العنوان', { exact: true }).fill('شارع السوق بجوار المخبز');
-  await ownerPage.getByLabel('المحافظة').selectOption({ label: 'النصيرات' });
-  await ownerPage.getByRole('button', { name: 'حفظ المتجر' }).click();
-  await expect(ownerPage.getByRole('heading', { name: 'متجر تجريبي' })).toBeVisible();
-  await ownerPage.getByText('تعديل بيانات المتجر', { exact: true }).click();
-  const editForm = ownerPage.locator('article');
-  await expect(editForm.getByLabel('العنوان', { exact: true })).toHaveValue('شارع السوق بجوار المخبز');
-  await expect(editForm.getByLabel('المحافظة')).toHaveValue('5');
 });
 
 test('store owner creates a section and saves a product with a multipart image', async ({ page }) => {

@@ -1,6 +1,7 @@
 import {
   createContext,
   useContext,
+  useCallback,
   useEffect,
   useState,
   type ReactNode,
@@ -66,17 +67,17 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     window.addEventListener('session-expired', expire);
     return () => window.removeEventListener('session-expired', expire);
   }, []);
-  async function establish(tokens: Session) {
+  const establish = useCallback(async (tokens: Session) => {
     setSession(tokens);
     try {
       const profile = await api<Profile>('/auth/profile');
       setProfile(profile);
       return profile;
     } catch (error) {
-      setSession(null);
+      if (getSession()?.refresh_token === tokens.refresh_token) setSession(null);
       throw error;
     }
-  }
+  }, []);
   async function logout() {
     const session = getSession();
     try {

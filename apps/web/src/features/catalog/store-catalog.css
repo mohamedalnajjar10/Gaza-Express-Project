@@ -1,9 +1,11 @@
 .store-catalog { max-width: 1120px; margin-inline: auto; }
 .store-tools { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .store-tools > button { border-radius: 50%; width: 46px; padding: 0; flex: none; }
-.store-search { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; background: #fff; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px 3px 3px; }
+.store-search { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; background: var(--surface, #fff); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px 3px 3px; }
 .store-search svg { flex: none; color: var(--muted); }
 .store-search input { min-width: 0; border: 0; background: transparent; }
+.store-search input:focus-visible { outline: none; }
+.store-search:focus-within { outline: 3px solid var(--focus, #a35508); outline-offset: 2px; }
 .store-search button { border-radius: 999px; min-height: 42px; }
 .store-summary { position: relative; overflow: hidden; background: #edf5ef; }
 .store-summary-image { float: inline-end; width: clamp(64px, 12vw, 118px); aspect-ratio: 1; object-fit: contain; background: white; border-radius: 16px; margin-inline-start: 12px; }
@@ -32,10 +34,11 @@
   .store-category-tile, .store-category-tile:hover { font-size: .73rem; overflow-wrap: anywhere; }
   .store-section-rail .store-category-tile { flex-basis: 74px; }
   .store-product-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .store-cart-bar { bottom: calc(57px + env(safe-area-inset-bottom)); }
+  .store-cart-bar { bottom: calc(64px + env(safe-area-inset-bottom)); }
 }
-.store-name-row { display: flex; align-items: start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.store-name-row { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .store-name-row h1 { font-size: clamp(1.05rem, 3vw, 1.3rem); margin: 8px 0 0; overflow-wrap: anywhere; }
+.store-delivery-summary { margin: 0 0 12px; padding: 8px 12px; border-radius: 10px; background: #eef6f0; color: #195f36; font-size: .84rem; font-weight: 600; }
 .store-favorite { display: grid; justify-items: end; flex-shrink: 0; }
 .store-favorite-button { padding: 6px 10px; font-size: .78rem; transition: background .15s ease, color .15s ease; }
 .store-favorite-button[aria-pressed='true'] { background: #fff0f1; border-color: #f0c6cd; color: #9c3046; }

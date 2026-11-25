@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { LocateFixed, MapPin, Search } from 'lucide-react';
-import { loadGoogleMaps, roundPoint, type MapPoint } from './google-maps';
+import { loadGoogleMaps, roundPoint, type MapPoint } from '../../shared/lib/google-maps';
+import { normalizeDigits } from '../../shared/lib/numbers';
 
 function parseCoordinate(value: string, limit: number) {
-  const normalized = value.trim()
-    .replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660))
-    .replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0))
+  const normalized = normalizeDigits(value.trim())
     .replace(/[٫,]/g, '.')
     .replace(/−/g, '-');
   if (!/^[+-]?[0-9]+(?:\.[0-9]+)?$/.test(normalized)) return undefined;
@@ -22,6 +21,7 @@ export function AddressMap({ point, onChange, onArea }: {
   const map = useRef<google.maps.Map | undefined>(undefined);
   const geocoder = useRef<google.maps.Geocoder | undefined>(undefined);
   const sequence = useRef(0);
+  const skipNextPan = useRef(false);
   const latest = useRef({ onChange, onArea });
   latest.current = { onChange, onArea };
   const [ready, setReady] = useState(false);
@@ -47,6 +47,7 @@ export function AddressMap({ point, onChange, onArea }: {
   }
 
   useEffect(() => {
+    const requestSequence = sequence;
     let active = true;
     const listeners: google.maps.MapsEventListener[] = [];
     const failed = () => { if (active) { setReady(false); setUnavailable(true); } };
@@ -67,22 +68,31 @@ export function AddressMap({ point, onChange, onArea }: {
       }));
       listeners.push(instance.addListener('dragend', () => {
         const center = instance.getCenter();
-        if (center) void choose(center.toJSON());
+        if (center) {
+          skipNextPan.current = true;
+          void choose(center.toJSON());
+        }
       }));
       setReady(true);
     }).catch(failed);
     return () => {
       active = false;
-      sequence.current++;
+      requestSequence.current++;
       listeners.forEach(listener => listener.remove());
       map.current = undefined;
       window.removeEventListener('google-maps-auth-failure', failed);
     };
   }, []);
 
+  const latitude = point?.lat;
+  const longitude = point?.lng;
   useEffect(() => {
-    if (point && map.current) map.current.panTo(point);
-  }, [point?.lat, point?.lng, ready]);
+    if (skipNextPan.current) {
+      skipNextPan.current = false;
+      return;
+    }
+    if (latitude !== undefined && longitude !== undefined) map.current?.panTo({ lat: latitude, lng: longitude });
+  }, [latitude, longitude, ready]);
 
   function locate() {
     if (!navigator.geolocation) { setMessage('تحديد الموقع غير مدعوم في هذا المتصفح. اختر موقعك من الخريطة أو أدخل الإحداثيات يدويًا.'); return; }
@@ -110,18 +120,18 @@ export function AddressMap({ point, onChange, onArea }: {
         <div className="address-map-canvas" ref={canvas} aria-label="خريطة Google لتحديد العنوان" />
         {ready && <span className="address-map-pin" aria-hidden="true"><MapPin size={46} fill="currentColor" strokeWidth={1.7} /></span>}
         {!ready && <div className="address-map-unavailable">
-          <MapPin size={32} />
+          <MapPin size={32} aria-hidden="true" />
           <strong>{unavailable ? 'الخريطة غير متاحة حالياً' : 'جارٍ تحميل الخريطة…'}</strong>
           <p>{unavailable ? 'استخدم موقعك الحالي أو أدخل الإحداثيات يدويًا.' : 'اختر موقعك بدقة لتسهيل التوصيل.'}</p>
         </div>}
         <button type="button" className="address-locate" onClick={locate} disabled={locating}>
-          <LocateFixed size={18} />{locating ? 'جارٍ تحديد الموقع…' : 'موقعي الحالي'}
+          <LocateFixed size={18} aria-hidden="true" />{locating ? 'جارٍ تحديد الموقع…' : 'موقعي الحالي'}
         </button>
         {ready && <div className="address-map-search">
           <label className="sr-only" htmlFor="address-map-search">البحث عن منطقة على الخريطة</label>
           <input id="address-map-search" value={search} onChange={event => setSearch(event.target.value)} placeholder="ابحث عن منطقة أو شارع" maxLength={150}
             onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void searchMap(); } }} />
-          <button type="button" aria-label="بحث في الخريطة" onClick={() => void searchMap()}><Search size={18} /></button>
+          <button type="button" aria-label="بحث في الخريطة" onClick={() => void searchMap()}><Search size={18} aria-hidden="true" /></button>
         </div>}
       </div>
       <div className="address-map-caption"><span>{point ? 'تم تحديد الموقع' : unavailable ? 'حدّد موقع التوصيل قبل حفظ العنوان' : 'حرّك الخريطة أو اضغط عليها لتحديد الموقع'}</span>{message && <p role="status">{message}</p>}</div>

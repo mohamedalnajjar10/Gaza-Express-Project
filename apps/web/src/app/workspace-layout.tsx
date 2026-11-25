@@ -1,12 +1,11 @@
-import { Suspense } from 'react';
+import { Suspense, useEffect } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { ArrowUpLeft, ShoppingBag } from 'lucide-react';
 import type { Role } from '../shared/auth/types';
-import { AccountAvatar } from '../features/account/account-avatar';
+import { AccountAvatar } from '../shared/ui/account-avatar';
 import { Busy } from '../shared/ui/feedback';
 import { workspaceAccountLinks, workspaces } from './workspace-navigation';
 import '../styles/workspaces.css';
-import '../styles/owner-workspace.css';
 
 type StaffRole = Exclude<Role, 'customer'>;
 
@@ -23,6 +22,12 @@ export function WorkspaceLayout({
   const workspace = workspaces[role];
   const displayName = name?.trim() || workspace.title;
 
+  useEffect(() => {
+    if (role === 'store_owner' || role === 'admin') {
+      void import('../styles/owner-workspace.css');
+    }
+  }, [role]);
+
   return (
     <div className={`workspace workspace--${role}`}>
       <a className="skip" href="#content">
@@ -31,7 +36,7 @@ export function WorkspaceLayout({
       <aside className="workspace-sidebar">
         <Link to="/operations" className="workspace-brand">
           <span className="workspace-mark">
-            <ShoppingBag size={21} />
+            <ShoppingBag size={21} aria-hidden="true" />
           </span>
           <span>
             غزة إكسبرس<small>{workspace.title}</small>

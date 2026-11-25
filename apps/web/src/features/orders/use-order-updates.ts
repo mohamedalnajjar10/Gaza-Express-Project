@@ -36,7 +36,6 @@ export function useOrderUpdates(reload: () => void, enabled = true) {
               window.clearTimeout(handshake);
               setConnected(true);
               delay = 1000;
-              changed = true;
             } else if (line === 'data: changed') {
               changed = true;
             }
