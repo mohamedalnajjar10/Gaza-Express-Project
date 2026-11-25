@@ -51,8 +51,28 @@ export class GlobalExceptionFilter implements ExceptionFilter {
             }
         }
 
+        else if (exception instanceof Prisma.PrismaClientValidationError) {
+            this.logger.warn({
+                event: 'prisma_validation_error',
+                requestId: response.getHeader('X-Request-ID'),
+                name: exception.name,
+                message: exception.message,
+            });
+            status = HttpStatus.BAD_REQUEST;
+            message = 'Invalid request data';
+        }
+
         else {
-            this.logger.error({ event: 'unexpected_http_error', requestId: response.getHeader('X-Request-ID') });
+            const error = exception instanceof Error ? exception : undefined;
+            this.logger.error({
+                event: 'unexpected_http_error',
+                requestId: response.getHeader('X-Request-ID'),
+                method: request.method,
+                path: request.path,
+                name: error?.name ?? typeof exception,
+                message: error?.message ?? 'Non-Error exception thrown',
+                stack: error?.stack,
+            });
         }
 
         response.status(status).json({

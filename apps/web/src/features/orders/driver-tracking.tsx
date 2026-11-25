@@ -3,7 +3,7 @@ import { api } from '../../shared/api/client';
 import { usePolling } from '../../shared/hooks/use-polling';
 import { useResource } from '../../shared/hooks/use-resource';
 import { Result } from '../../shared/ui/feedback';
-import { loadGoogleMaps, type MapPoint } from '../addresses/google-maps';
+import { loadGoogleMaps, type MapPoint } from '../../shared/lib/google-maps';
 import './dispatch.css';
 
 type Position = { latitude: number; longitude: number; updatedAt: string };

@@ -23,6 +23,10 @@ export class ReviewsService {
         throw new NotFoundException('Store not found');
       }
 
+      if (store.ownerId === userId) {
+        throw new ForbiddenException('Store owners cannot review their own store');
+      }
+
       const existing = await tx.review.findUnique({
         where: { storeId_userId: { storeId: dto.storeId, userId } },
       });

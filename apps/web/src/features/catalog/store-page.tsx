@@ -2,14 +2,13 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowRight, Grid2X2, Heart, Minus, Package, Plus, Search, ShoppingBag } from 'lucide-react';
 import './store-catalog.css';
-import { api } from '../../shared/api/client';
+import { ApiError, api } from '../../shared/api/client';
 import { type Product, type Store } from './types';
 import { ProductImage } from './product-image';
 import { useStoreCart } from './use-store-cart';
 import { useIdentity } from '../../shared/auth/identity';
 import { money } from '../../shared/lib/money';
 import { Empty, ErrorBox, Result, Title } from '../../shared/ui/feedback';
-import { ActionForm } from '../../shared/ui/form';
 import { useResource } from '../../shared/hooks/use-resource';
 
 type Section = { prodCategoryId: number; nameAr: string; parentId?: number | null; products?: Product[] };
@@ -42,10 +41,11 @@ function StoreCatalog({ id }: { id?: string }) {
     `store-sections:${id}`,
   );
   const showBestSellers = catalogMode === 'best' && !activeCategory && !query;
+  const pageSize = 25;
   const products = useResource(
     signal =>
       profile
-        ? api<Product[]>(showBestSellers ? `/products/store/${id}/best-sellers` : `/products/store/${id}?page=${page}&limit=25${activeCategory ? `&categoryId=${activeCategory}` : ''}${query ? `&q=${encodeURIComponent(query)}` : ''}`, {
+        ? api<Product[]>(showBestSellers ? `/products/store/${id}/best-sellers` : `/products/store/${id}?page=${page}&limit=${pageSize}&lookahead=1${activeCategory ? `&categoryId=${activeCategory}` : ''}${query ? `&q=${encodeURIComponent(query)}` : ''}`, {
             signal,
           })
         : Promise.resolve([]),
@@ -77,10 +77,24 @@ function StoreCatalog({ id }: { id?: string }) {
         <div className="store-catalog">
           <div className="store-name-row">
             <h1>{store.storeNameAr || store.storeName}</h1>
+            {store.planTier === 'PRO' && <span className="badge">شريك PRO</span>}
             {profile?.role === 'customer' && <StoreFavorite storeId={store.storeId} />}
           </div>
+          {(store.freeDeliveryThreshold != null || Number(store.deliveryBaseFee ?? 0) > 0 || Number(store.deliveryPerKmFee ?? 0) > 0) && (
+            <p className="store-delivery-summary">
+              {Number(store.deliveryBaseFee ?? 0) > 0 || Number(store.deliveryPerKmFee ?? 0) > 0
+                ? `رسوم التوصيل: ${money(store.deliveryBaseFee ?? 0)}${Number(store.deliveryPerKmFee ?? 0) > 0 ? ` + ${money(store.deliveryPerKmFee ?? 0)} / كم` : ''}`
+                : null}
+              {store.freeDeliveryThreshold != null && (
+                <>
+                  {(Number(store.deliveryBaseFee ?? 0) > 0 || Number(store.deliveryPerKmFee ?? 0) > 0) ? ' · ' : ''}
+                  توصيل مجاني للطلبات من {money(store.freeDeliveryThreshold)} فأكثر
+                </>
+              )}
+            </p>
+          )}
           <div className="store-tools">
-            <button type="button" className="secondary" aria-label={section ? 'العودة لأقسام المتجر' : 'العودة للمتاجر'} onClick={() => section ? choose() : navigate('/')}><ArrowRight size={20} /></button>
+            <button type="button" className="secondary" aria-label={section ? 'العودة لأقسام المتجر' : 'العودة للمتاجر'} onClick={() => section ? choose() : navigate('/')}><ArrowRight size={20} aria-hidden="true" /></button>
             <form className="store-search" onSubmit={event => {
               event.preventDefault();
               setQuery(String(new FormData(event.currentTarget).get('q') ?? '').trim());
@@ -91,7 +105,7 @@ function StoreCatalog({ id }: { id?: string }) {
               <button>بحث</button>
             </form>
           </div>
-          {<button type="button" className="secondary" onClick={() => { choose(); setCatalogMode('best'); }}>الأكثر مبيعًا</button>}
+          {<button type="button" className={showBestSellers ? 'chip selected' : 'chip'} aria-pressed={showBestSellers} onClick={() => { choose(); setCatalogMode('best'); }}>الأكثر مبيعًا</button>}
           {(
             <section className="store-section-picker" aria-label="أقسام المتجر">
               <h2>{section ? 'تصفّح الأقسام' : 'تسوّق حسب القسم'}</h2>
@@ -118,8 +132,9 @@ function StoreCatalog({ id }: { id?: string }) {
             <Result state={products}>
               {items => (
                 <>
-                  <ProductGrid items={items} basket={profile.role === 'customer' ? basket : undefined} emptyTitle={showBestSellers ? 'لا توجد مبيعات مكتملة لعرضها بعد' : undefined} />
-                  {!showBestSellers && <div className="pagination">
+                  <ProductGrid items={showBestSellers ? items : items.slice(0, pageSize)} basket={profile.role === 'customer' ? basket : undefined} emptyTitle={showBestSellers ? 'لا توجد مبيعات مكتملة لعرضها بعد' : undefined} />
+                  {showBestSellers && items.length === 0 && <button type="button" className="secondary" onClick={() => choose()}>تصفّح المنتجات المتاحة</button>}
+                  {!showBestSellers && (page > 1 || items.length >= pageSize) && <div className="pagination">
                     <button
                       className="secondary"
                       disabled={page === 1}
@@ -130,7 +145,7 @@ function StoreCatalog({ id }: { id?: string }) {
                     <span>{page}</span>
                     <button
                       className="secondary"
-                      disabled={items.length < 25}
+                      disabled={page >= 200 || items.length <= pageSize}
                       onClick={() => setPage(p => p + 1)}
                     >
                       التالي
@@ -180,7 +195,7 @@ function StoreFavorite({ storeId }: { storeId: number }) {
       <button type="button" className="secondary store-favorite-button" aria-pressed={!!favorite}
         disabled={pending || favorite === undefined} aria-label={favorite ? 'إزالة المتجر من المفضلة' : 'إضافة المتجر للمفضلة'} onClick={toggle}>
         <Heart size={17} fill={favorite ? 'currentColor' : 'none'} aria-hidden="true" />
-        {favorite ? 'في المفضلة' : 'المفضلة'}
+        {favorite ? 'إزالة المتجر من المفضلة' : 'إضافة المتجر للمفضلة'}
       </button>
       {Boolean(error || state.error) && <ErrorBox error={error || state.error} retry={state.error ? state.reload : undefined} />}
     </div>
@@ -213,7 +228,7 @@ function ProductGrid({ items, basket, emptyTitle = 'لا توجد منتجات �
 function ProductTile({ product, basket }: { product: Product; basket?: StoreBasket }) {
   const [expanded, setExpanded] = useState(false);
   const [optionIds, setOptionIds] = useState<number[]>([]);
-  const [saved, setSaved] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const options = product.productOptions?.filter(option => option.isAvailable) ?? [];
   const selectedOptions = optionIds.filter(id => options.some(option => option.optionId === id));
   const lines = basket?.cart?.items.filter(line => line.productId === product.productId) ?? [];
@@ -272,15 +287,55 @@ function ProductTile({ product, basket }: { product: Product; basket?: StoreBask
         </div>
       )}
       {basket?.error?.productId === product.productId && <ErrorBox error={basket.error.reason} />}
-      {(product.descriptionAr || product.priceNoteAr || basket) && <details className="store-inline-details">
+      {(product.descriptionAr || product.priceNoteAr || basket) && <details className="store-inline-details" onToggle={event => setDetailsOpen(event.currentTarget.open)}>
         <summary>تفاصيل المنتج</summary>
         {product.descriptionAr && <p>{product.descriptionAr}</p>}
         {product.priceNoteAr && <p>{product.priceNoteAr}</p>}
-        {basket && (saved ? <p role="status">تم حفظ المنتج في المفضلة</p> : <ActionForm label="احفظ المنتج في المفضلة" submit={async () => {
-          await api(`/favorites/products/${product.productId}`, { method: 'POST' });
-          setSaved(true);
-        }} />)}
+        {basket && detailsOpen && <ProductFavorite productId={product.productId} />}
       </details>}
     </article>
   );
+}
+
+function ProductFavorite({ productId }: { productId: number }) {
+  const check = `/favorites/products/check/${productId}`;
+  const state = useResource(signal => api<boolean>(check, { signal }), check);
+  const [saved, setSaved] = useState<boolean>();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<unknown>();
+
+  return <Result state={state}>{initial => {
+    const favorite = saved ?? initial;
+    async function toggle() {
+      if (pending) return;
+      setPending(true);
+      setError(undefined);
+      try {
+        if (favorite) {
+          await api(`/favorites/products/${productId}`, { method: 'DELETE' });
+          setSaved(false);
+        } else {
+          try {
+            await api(`/favorites/products/${productId}`, { method: 'POST' });
+          } catch (failure) {
+            if (!(failure instanceof ApiError) || failure.status !== 409 || !await api<boolean>(check)) throw failure;
+          }
+          setSaved(true);
+        }
+      } catch (failure) {
+        setError(failure);
+      } finally {
+        setPending(false);
+      }
+    }
+    return (
+      <div className="stack">
+        {favorite && <p role="status">تم حفظ المنتج في المفضلة</p>}
+        {error ? <ErrorBox error={error} /> : null}
+        <button type="button" className="secondary" disabled={pending} aria-pressed={favorite} onClick={() => void toggle()}>
+          {pending ? 'جارٍ التنفيذ…' : favorite ? 'إزالة من المفضلة' : 'احفظ المنتج في المفضلة'}
+        </button>
+      </div>
+    );
+  }}</Result>;
 }

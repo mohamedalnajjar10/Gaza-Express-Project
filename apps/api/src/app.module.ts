@@ -1,6 +1,6 @@
 import { NotificationsModule } from './notifications/notifications.module';
 import { OrdersModule } from './orders/orders.module';
-import { OrderUpdatesModule } from './orders/order-updates';
+import { OrderUpdatesModule } from './infrastructure/order-updates';
 import { validateEnvironment } from './config/environment';
 import { RedisModule, RedisStorage } from './infrastructure/redis.module';
 import { Module } from '@nestjs/common';
@@ -12,6 +12,7 @@ import { SmsModule } from './sms/sms.module';
 import { PrismaModule } from 'prisma/prisma.module';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RateLimitGuard, rateLimitOptions } from './infrastructure/rate-limit';
 import { AppController } from './app.controller';
 import { CategoriesModule } from './categories/categories.module';
@@ -62,6 +63,9 @@ import { ReviewsModule } from './reviews/reviews.module';
     NotificationsModule,
   ],
   controllers: [AppController],
-  providers: [{ provide: APP_GUARD, useClass: RateLimitGuard }],
+  providers: [
+    { provide: APP_GUARD, useClass: RateLimitGuard },
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+  ],
 })
 export class AppModule { }

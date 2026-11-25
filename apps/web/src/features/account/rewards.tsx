@@ -1,23 +1,10 @@
 import { Gift } from 'lucide-react';
 import { useEffect, useRef } from 'react';
-import { Link, useLocation } from 'react-router-dom';
-import { api } from '../../shared/api/client';
-import { useResource } from '../../shared/hooks/use-resource';
+import { useLocation } from 'react-router-dom';
 import { Result } from '../../shared/ui/feedback';
+import { RewardsLink, useRewards } from '../../shared/ui/rewards';
 
-type Rewards = { balance: number; pointsPerOrder: number; pointsRequired: number; discountPercent: number };
-export function useRewards(active = true) {
-  return useResource(signal => active ? api<Rewards>('/rewards', { signal }) : Promise.resolve(null), `rewards:${active}`);
-}
-
-export function RewardsLink() {
-  return (
-    <Link className="rewards-shortcut" to="/account#account-rewards">
-      <span><Gift size={15} aria-hidden="true" /></span>
-      المكافآت
-    </Link>
-  );
-}
+export { RewardsLink, useRewards };
 
 export function RewardsCard() {
   const state = useRewards();
@@ -35,7 +22,9 @@ export function RewardsCard() {
         <strong>{reward.balance} نقطة</strong>
         <progress aria-label="التقدم نحو الخصم" value={Math.min(reward.balance, reward.pointsRequired)} max={reward.pointsRequired} />
         <p>{reward.balance >= reward.pointsRequired ? `خصم ${reward.discountPercent}٪ جاهز للاستخدام عند تأكيد طلبك.` : `تبقّى ${reward.pointsRequired - reward.balance} نقطة للحصول على خصم ${reward.discountPercent}٪.`}</p>
-        <small>{reward.pointsPerOrder} نقاط لكل طلب مُسلّم.</small>
+        <small>
+          {reward.pointsPerOrder} نقاط لكل طلب عند الاستلام · و{reward.bankTransferPointsPerOrder ?? reward.pointsPerOrder * 2} نقطة (ضعف النقاط) عند الدفع عبر بنك فلسطين.
+        </small>
       </>}</Result>
     </section>
   );

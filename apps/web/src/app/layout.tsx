@@ -9,9 +9,9 @@ import {
   UserRound,
 } from 'lucide-react';
 import { useIdentity } from '../shared/auth/identity';
+import { AccountAvatar } from '../shared/ui/account-avatar';
 import { Busy } from '../shared/ui/feedback';
-import { AccountAvatar } from '../features/account/account-avatar';
-import { RewardsLink } from '../features/account/rewards';
+import { RewardsLink } from '../shared/ui/rewards';
 import { WorkspaceLayout } from './workspace-layout';
 
 function Header() {
@@ -21,7 +21,7 @@ function Header() {
       <div className="header-inner">
         <Link className="brand" to="/">
           <span className="brand-icon">
-            <ShoppingBag size={22} />
+            <ShoppingBag size={22} aria-hidden="true" />
           </span>
           <span>
             غزة إكسبرس<small>GAZA EXPRESS</small>
@@ -29,19 +29,19 @@ function Header() {
         </Link>
         <nav aria-label="التنقل الرئيسي">
           {profile && <NavLink to="/" end>
-            <House size={19} /> المتاجر
+            <House size={19} aria-hidden="true" /> المتاجر
           </NavLink>}
           {profile && profile.role !== 'customer' && (
-            <NavLink to="/operations"><Package size={19} /> لوحة العمل</NavLink>
+            <NavLink to="/operations"><Package size={19} aria-hidden="true" /> لوحة العمل</NavLink>
           )}
           {profile?.role === 'customer' && (
             <NavLink to="/favorites">
-              <Heart size={19} /> المفضلة
+              <Heart size={19} aria-hidden="true" /> المفضلة
             </NavLink>
           )}
           {profile?.role === 'customer' && (
             <NavLink to="/orders">
-              <Package size={19} /> الطلبات
+              <Package size={19} aria-hidden="true" /> الطلبات
             </NavLink>
           )}
           {profile?.role === 'customer' && <RewardsLink />}
@@ -53,18 +53,18 @@ function Header() {
               aria-label="الإشعارات"
               to="/notifications"
             >
-              <Bell size={21} />
+              <Bell size={21} aria-hidden="true" />
             </Link>
           )}
           {profile?.role === 'customer' && (
             <Link className="icon-btn" aria-label="السلة" to="/cart">
-              <ShoppingBag size={21} />
+              <ShoppingBag size={21} aria-hidden="true" />
             </Link>
           )}
-          <Link className="header-login" aria-label={profile ? 'حسابي' : undefined} to={profile ? '/account' : '/login'}>
+          <Link className="header-login" to={profile ? '/account' : '/login'}>
             {profile ? (
               <AccountAvatar compact src={profile.profile_photo_url} name={profile.full_name_ar?.trim() || profile.full_name?.trim() || 'حسابي'} />
-            ) : <UserRound size={18} />}
+            ) : <UserRound size={18} aria-hidden="true" />}
             <span>{profile ? 'حسابي' : 'تسجيل الدخول'}</span>
             {profile && <bdi className="header-profile-name">{profile.full_name_ar?.trim() || profile.full_name?.trim()}</bdi>}
           </Link>
@@ -73,6 +73,7 @@ function Header() {
     </header>
   );
 }
+
 export function Layout() {
   const { pathname } = useLocation();
   const { profile } = useIdentity();
@@ -94,10 +95,10 @@ export function Layout() {
         </Suspense>
       </main>
       {profile?.role === 'customer' && <nav className="market-bottom-nav" aria-label="التنقل السريع">
-        <NavLink aria-label="الرئيسية" to="/" end><House size={21} /> الرئيسية</NavLink>
-        <NavLink aria-label="طلباتي" to="/orders"><Package size={21} /> الطلبات</NavLink>
-        <NavLink aria-label="سلة التسوق" to="/cart"><ShoppingBag size={21} /> السلة</NavLink>
-        <NavLink aria-label="الملف الشخصي" to="/account"><UserRound size={21} /> حسابي</NavLink>
+        <NavLink aria-label="الرئيسية" to="/" end><House size={21} aria-hidden="true" /> الرئيسية</NavLink>
+        <NavLink to="/orders"><Package size={21} aria-hidden="true" /> الطلبات</NavLink>
+        <NavLink to="/cart"><ShoppingBag size={21} aria-hidden="true" /> السلة</NavLink>
+        <NavLink to="/account"><UserRound size={21} aria-hidden="true" /> حسابي</NavLink>
       </nav>}
       <footer>
         <div className="container footer">

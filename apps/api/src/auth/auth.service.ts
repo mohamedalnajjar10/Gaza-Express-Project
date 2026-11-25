@@ -38,7 +38,7 @@ export class AuthService {
     ) { }
 
     async register(dto: RegisterDto) {
-        await this.otpService.sendSignup(dto.phone, true);
+        await this.otpService.sendSignup(dto.phone, true, dto.role);
         return { message: 'If verification is available, a code will be sent' };
     }
 
@@ -56,6 +56,7 @@ export class AuthService {
             throw new UnauthorizedException(AUTH_ERROR_MESSAGES.INVALID_CREDENTIALS);
         }
 
+        if (!user.is_active) throw new ForbiddenException('Account disabled');
         if (!user.is_verified) {
             throw new ForbiddenException('Please verify your phone number first');
         }
@@ -79,17 +80,23 @@ export class AuthService {
     }
 
     async verifyOtp(dto: VerifyOtpDto) {
-        const tokens = await this.otpService.verifyOtp(dto.phone, dto.code, OtpType.PHONE_VERIFICATION, async (tx, userId) => {
+        const tokens = await this.otpService.verifyOtp(dto.phone, dto.code, OtpType.PHONE_VERIFICATION, async (tx, userId, pendingRole) => {
+            if (pendingRole === 'admin' || (pendingRole && dto.role && pendingRole !== dto.role)) {
+                throw new BadRequestException('نوع الحساب يختلف عن طلب التسجيل. أعد التسجيل بالنوع المطلوب واطلب رمزًا جديدًا.');
+            }
+            const role = pendingRole ?? dto.role ?? 'customer';
             const user = await tx.user.update({
                 where: { user_id: userId },
                 data: {
                     full_name: dto.full_name.trim(),
                     full_name_ar: dto.full_name_ar?.trim() ?? null,
                     email: dto.email?.toLowerCase() ?? null,
-                    role: dto.role ?? 'customer',
+                    role,
+                    pendingSignupRole: null,
                     password_hash: await bcrypt.hash(dto.password, AUTH_CONSTANTS.BCRYPT_ROUNDS),
                     is_verified: true,
                     last_seen_at: new Date(),
+                    ...(role === 'driver' && { driverProfile: { upsert: { create: {}, update: {} } } }),
                 },
             });
             const session = await this.generateTokens(user);
@@ -112,28 +119,39 @@ export class AuthService {
             include: { user: true },
         });
 
-        if (!storedToken || storedToken.revoked_at || storedToken.expires_at < new Date()) {
+        if (!storedToken || storedToken.expires_at < new Date()) {
+            throw new UnauthorizedException('Invalid refresh token');
+        }
+
+        if (storedToken.revoked_at) {
+            this.logger.warn({ event: 'refresh_token_reuse_detected', userId: storedToken.user_id });
+            await this.revokeUserSessions(storedToken.user_id);
             throw new UnauthorizedException('Invalid refresh token');
         }
 
         const tokens = await this.prisma.$transaction(async tx => {
             await tx.$queryRaw`SELECT user_id FROM users WHERE user_id = ${storedToken.user_id} FOR UPDATE`;
             const user = await tx.user.findUnique({ where: { user_id: storedToken.user_id } });
-            if (!user || user.sessionVersion !== storedToken.user.sessionVersion) {
+            if (!user || !user.is_active || !user.is_verified) {
+                throw new UnauthorizedException('Account unavailable');
+            }
+            if (user.sessionVersion !== storedToken.user.sessionVersion) {
                 throw new UnauthorizedException('Session changed');
             }
-            const tokens = await this.generateTokens(user);
+            const nextTokens = await this.generateTokens(user);
             const consumed = await tx.refreshToken.updateMany({
                 where: { token_id: storedToken.token_id, revoked_at: null, expires_at: { gt: new Date() } },
                 data: { revoked_at: new Date() },
             });
-            if (consumed.count !== 1) throw new UnauthorizedException('Refresh token already consumed');
+            if (consumed.count !== 1) {
+                throw new UnauthorizedException('Refresh token already consumed');
+            }
             await tx.refreshToken.create({ data: {
                 user_id: storedToken.user.user_id,
-                token: crypto.createHash('sha256').update(tokens.refresh_token).digest('hex'),
+                token: crypto.createHash('sha256').update(nextTokens.refresh_token).digest('hex'),
                 expires_at: new Date(Date.now() + this.parseExpiryToSeconds(this.configService.get<string>('JWT_REFRESH_EXPIRES_IN', '7d')) * 1000),
             } });
-            return tokens;
+            return nextTokens;
         });
 
         return {
@@ -145,15 +163,36 @@ export class AuthService {
     async logout(userId: number, refreshToken: string) {
         const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
 
-        await this.prisma.refreshToken.updateMany({
-            where: {
-                user_id: userId,
-                token: tokenHash,
-            },
-            data: { revoked_at: new Date() },
+        await this.prisma.$transaction(async tx => {
+            const revoked = await tx.refreshToken.updateMany({
+                where: {
+                    user_id: userId,
+                    token: tokenHash,
+                },
+                data: { revoked_at: new Date() },
+            });
+            if (revoked.count > 0) {
+                await tx.user.update({
+                    where: { user_id: userId },
+                    data: { sessionVersion: { increment: 1 } },
+                });
+            }
         });
 
         return { message: 'Logout successful' };
+    }
+
+    private async revokeUserSessions(userId: number) {
+        await this.prisma.$transaction([
+            this.prisma.user.update({
+                where: { user_id: userId },
+                data: { sessionVersion: { increment: 1 } },
+            }),
+            this.prisma.refreshToken.updateMany({
+                where: { user_id: userId, revoked_at: null },
+                data: { revoked_at: new Date() },
+            }),
+        ]);
     }
 
     private async generateTokens(user: User): Promise<Tokens> {

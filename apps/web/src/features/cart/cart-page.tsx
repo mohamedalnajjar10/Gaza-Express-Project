@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, MessageSquare, Minus, Package, Plus, Trash2 } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { api } from '../../shared/api/client';
@@ -8,6 +8,7 @@ import { useResource } from '../../shared/hooks/use-resource';
 import { ProductImage } from '../catalog/product-image';
 import type { Product } from '../catalog/types';
 import { getCart, replaceCart, type Cart } from './cart-api';
+import { clearCartNote, getCartNote, setCartNote } from './cart-note';
 import './cart.css';
 
 function price(min?: string | number | null, max?: string | number | null) {
@@ -23,12 +24,22 @@ export default function CartPage() {
 function CartContents({ initial }: { initial: Cart }) {
   const location = useLocation();
   const [cart, setCart] = useState(initial);
-  const [note, setNote] = useState<string>(() => location.state?.storeId === initial.storeId && typeof location.state?.note === 'string' ? location.state.note : '');
+  useEffect(() => {
+    setCart(initial);
+  }, [initial]);
+  const [note, setNote] = useState<string>(() =>
+    location.state?.storeId === initial.storeId && typeof location.state?.note === 'string'
+      ? location.state.note
+      : getCartNote(initial.storeId),
+  );
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
   const lock = useRef(false);
   const storeId = cart.storeId;
   const storeLink = storeId ? `/stores/${storeId}` : '/';
+  useEffect(() => {
+    if (storeId) setCartNote(storeId, note);
+  }, [storeId, note]);
   const recommendations = useResource(
     signal => storeId ? api<Product[]>(`/products/store/${storeId}/best-sellers`, { signal }) : Promise.resolve([]),
     `cart-picks:${storeId}`,
@@ -42,12 +53,18 @@ function CartContents({ initial }: { initial: Cart }) {
     lock.current = true;
     setPending(true);
     setError(undefined);
+    const currentStoreId = cart.storeId;
     try {
       const saved = await replaceCart(cart.version, items);
-      setCart({ ...cart, ...saved, products: saved.products ?? [
-        ...(cart.products ?? []),
-        ...(added ? [{ ...added, isAvailable: true }] : []),
-      ] });
+      if (!saved.items.length) clearCartNote(currentStoreId);
+      setCart({
+        ...cart,
+        ...saved,
+        products: saved.products ?? [
+          ...(cart.products ?? []),
+          ...(added ? [{ ...added, isAvailable: true }] : []),
+        ],
+      });
     } catch (failure) {
       setError(failure);
       try { setCart(await getCart()); } catch { /* retain the last confirmed cart */ }
@@ -66,7 +83,7 @@ function CartContents({ initial }: { initial: Cart }) {
   return (
     <div className="cart-screen">
       <header className="cart-heading">
-        <Link to={storeLink} className="icon-btn" aria-label="العودة للمتجر"><ArrowRight size={20} /></Link>
+        <Link to={storeLink} className="icon-btn" aria-label="العودة للمتجر"><ArrowRight size={20} aria-hidden="true" /></Link>
         <div><h1>سلّتك</h1><p>{cart.store?.storeNameAr || cart.store?.storeName}</p></div>
         <Link to={storeLink} className="button secondary"><Plus size={17} aria-hidden="true" /> إضافة منتجات</Link>
       </header>
@@ -78,23 +95,24 @@ function CartContents({ initial }: { initial: Cart }) {
           {cart.items.map((item, index) => {
             const product = products.get(item.productId);
             const name = product?.nameAr || `منتج #${item.productId}`;
-            const options = item.optionIds.map(id => product?.productOptions?.find(option => option.optionId === id));
+            const optionIds = item.optionIds ?? [];
+            const options = optionIds.map(id => product?.productOptions?.find(option => option.optionId === id));
             const extra = options.reduce((sum, option) => sum + Number(option?.extraCost ?? 0), 0);
             const available = product?.isAvailable && options.every(option => option?.isAvailable);
             return (
-              <li className="cart-line" key={`${item.productId}:${item.optionIds.join(',')}`}>
+              <li className="cart-line" key={`${item.productId}:${optionIds.join(',')}`}>
                 <div className="cart-photo">{product?.imageUrl ? <ProductImage src={product.imageUrl} /> : <Package size={28} aria-hidden="true" />}</div>
                 <div className="cart-line-info">
                   <h2>{name}</h2>
                   {product?.unitAr && <small>{product.unitAr}</small>}
                   {options.length > 0 && <small>{options.map(option => option?.optionNameAr || option?.optionName || 'إضافة غير متاحة').join('، ')}</small>}
-                  {available ? <strong>{price((Number(product.estimatedPriceMin) + extra) * item.quantity, (Number(product.isPriceFixed ? product.estimatedPriceMin : product.estimatedPriceMax) + extra) * item.quantity)}</strong> : <small>غير متاح حاليًا</small>}
+                  {available ? <strong>{price((Number(product.estimatedPriceMin) + extra) * item.quantity, (Number(product.isPriceFixed ? product.estimatedPriceMin : (product.estimatedPriceMax ?? product.estimatedPriceMin)) + extra) * item.quantity)}</strong> : <small>غير متاح حاليًا</small>}
                 </div>
                 <div className="cart-line-actions">
                   <div className="cart-stepper" role="group" aria-label={`كمية ${name}`}>
-                    <button disabled={pending || (!available && item.quantity > 1)} onClick={() => changeQuantity(index, -1)} aria-label={`تقليل كمية ${name}`}><Minus size={17} /></button>
+                    <button disabled={pending || (!available && item.quantity > 1)} onClick={() => changeQuantity(index, -1)} aria-label={`تقليل كمية ${name}`}><Minus size={17} aria-hidden="true" /></button>
                     <output aria-live="polite">{item.quantity}</output>
-                    <button disabled={pending || !available || item.quantity >= 99} onClick={() => changeQuantity(index, 1)} aria-label={`زيادة كمية ${name}`}><Plus size={17} /></button>
+                    <button disabled={pending || !available || item.quantity >= 99} onClick={() => changeQuantity(index, 1)} aria-label={`زيادة كمية ${name}`}><Plus size={17} aria-hidden="true" /></button>
                   </div>
                   <button className="cart-remove" disabled={pending} onClick={() => void update(cart.items.filter((_, i) => i !== index))} aria-label={`إزالة ${name}`}><Trash2 size={16} aria-hidden="true" /></button>
                 </div>
@@ -109,8 +127,8 @@ function CartContents({ initial }: { initial: Cart }) {
               <div className="cart-photo">
                 {product.imageUrl ? <ProductImage src={product.imageUrl} /> : <Package size={30} aria-hidden="true" />}
                 {product.productOptions?.some(option => option.isAvailable)
-                  ? <Link className="button secondary cart-pick-action" to={storeLink} aria-label={`خيارات ${product.nameAr} في المتجر`}><Plus size={17} /></Link>
-                  : <button className="secondary cart-pick-action" disabled={pending} aria-label={`إضافة ${product.nameAr} إلى السلة`} onClick={() => void update([...cart.items, { productId: product.productId, quantity: 1, optionIds: [] }], product)}><Plus size={17} /></button>}
+                  ? <Link className="button secondary cart-pick-action" to={storeLink} aria-label={`خيارات ${product.nameAr} في المتجر`}><Plus size={17} aria-hidden="true" /></Link>
+                  : <button className="secondary cart-pick-action" disabled={pending} aria-label={`إضافة ${product.nameAr} إلى السلة`} onClick={() => void update([...cart.items, { productId: product.productId, quantity: 1, optionIds: [] }], product)}><Plus size={17} aria-hidden="true" /></button>}
               </div>
               <h3>{product.nameAr}</h3><strong>{price(product.estimatedPriceMin, product.isPriceFixed ? undefined : product.estimatedPriceMax)}</strong>
             </article>)}

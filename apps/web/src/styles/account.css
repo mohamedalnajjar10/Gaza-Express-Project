@@ -1,7 +1,7 @@
 .account-page {
   --account-accent: #216e56;
   --account-dark: #183e33;
-  --account-soft: #edf5ef;
+  --account-soft: var(--role-merchant-soft, #edf5ef);
   --account-border: #e1e7e3;
   --account-muted: #61726a;
   max-width: 1160px;
@@ -9,14 +9,14 @@
   padding-bottom: 24px;
 }
 .account-page--admin {
-  --account-accent: #67519c;
-  --account-dark: #34274e;
-  --account-soft: #f2eef9;
+  --account-accent: var(--role-admin-accent, #59449b);
+  --account-dark: var(--role-admin-dark, #27213f);
+  --account-soft: var(--role-admin-soft, #f0ebfd);
 }
 .account-page--driver {
-  --account-accent: #315d9e;
-  --account-dark: #203959;
-  --account-soft: #edf3fb;
+  --account-accent: var(--role-driver-accent, #244f9a);
+  --account-dark: var(--role-driver-dark, #142f65);
+  --account-soft: var(--role-driver-soft, #e9f0fe);
 }
 .account-heading {
   margin-bottom: 28px;

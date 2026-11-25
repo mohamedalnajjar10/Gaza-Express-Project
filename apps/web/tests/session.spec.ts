@@ -54,8 +54,7 @@ for (const role of ['customer', 'store_owner', 'driver', 'admin']) {
     await page
       .getByRole('button', { name: 'تسجيل الدخول', exact: true })
       .click();
-    if (role === 'customer')
-      await page.getByRole('link', { name: 'حسابي', exact: true }).click();
+    await expect(page).toHaveURL(/\/account$/);
     await expect(page.locator('.account-page')).toBeVisible();
     const navigations: string[] = [];
     page.on('framenavigated', (frame) => {
@@ -103,24 +102,31 @@ test('temporary restoration errors preserve the session and allow retry', async 
     { key, tokens },
   );
   let unavailable = true;
-  await page.route('**/api/v1/auth/profile', (route) =>
-    unavailable
-      ? route.fulfill({
-          status: 503,
-          json: { success: false, message: 'Unavailable' },
-        })
-      : route.fulfill({
-          json: {
-            success: true,
-            data: {
-              user_id: 3,
-              role: 'customer',
-              full_name: 'أحمد محمد',
-              phone: '0591234567',
-            },
-          },
-        }),
-  );
+  await page.route('**/api/v1/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/v1/rewards') {
+      return route.fulfill({ json: { success: true, data: { balance: 0, pointsRequired: 100 } } });
+    }
+    if (path !== '/api/v1/auth/profile') throw new Error(`Unexpected session request: ${path}`);
+    if (unavailable) {
+      return route.fulfill({
+        status: 503,
+        json: { success: false, message: 'Unavailable' },
+      });
+    }
+    return route.fulfill({
+      json: {
+        success: true,
+        data: {
+          user_id: 3,
+          role: 'customer',
+          full_name: 'أحمد محمد',
+          phone: '0591234567',
+          addressPromptedAt: '2026-11-17T10:00:00Z',
+        },
+      },
+    });
+  });
   await page.goto('/account');
   await expect(
     page.getByRole('heading', { name: 'تعذّر استعادة جلسة الدخول' }),
@@ -157,4 +163,30 @@ test('an invalid refresh token ends the session without a retry loop', async ({
   expect(
     await page.evaluate((key) => sessionStorage.getItem(key), key),
   ).toBeNull();
+});
+
+test('tab synchronization accepts only changes to its own session', async ({ page }) => {
+  await page.addInitScript(({ key, tokens }) => sessionStorage.setItem(key, JSON.stringify(tokens)), { key, tokens });
+  await page.route('**/api/v1/**', route => route.fulfill({ json: {
+    success: true,
+    data: route.request().url().endsWith('/auth/profile')
+      ? { user_id: 1, role: 'customer', full_name: 'Fixture', addressPromptedAt: 'done' }
+      : [],
+  } }));
+  await page.goto('/account');
+  await expect(page.getByRole('button', { name: 'تسجيل الخروج' })).toBeVisible();
+  const states = await page.evaluate(({ key, tokens, rotated }) => {
+    function receive(previous: string, session: typeof tokens | null) {
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: 'gaza-express.session-sync.v1', newValue: JSON.stringify({ previous, session, sender: 'other-tab' }),
+      }));
+      return JSON.parse(sessionStorage.getItem(key) ?? 'null');
+    }
+    return [
+      receive('unrelated', rotated), receive('unrelated', null),
+      receive(tokens.refresh_token, rotated), receive(tokens.refresh_token, null),
+      receive(rotated.refresh_token, null),
+    ];
+  }, { key, tokens, rotated });
+  expect(states).toEqual([tokens, tokens, rotated, rotated, null]);
 });

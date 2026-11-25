@@ -1,15 +1,22 @@
 import { StoreModerationDto, StoreModerationPageDto } from './dto/store-moderation.dto';
+import { StoreMonetizationDto } from './dto/store-monetization.dto';
 import { PageDto, pageWindow } from 'src/common/dto/page.dto';
 import { CatalogCache } from 'src/infrastructure/catalog-cache';
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { CreateStoreDto } from './dto/create-store.dto';
+import { UpdateStoreDto } from './dto/update-store.dto';
 import { QueryStoresDto, StoreSortBy } from './dto/query-stores.dto';
-import { UserRole, type StoreStatus } from '@prisma/client';
+import { Prisma, UserRole, type StoreStatus } from '@prisma/client';
 import { PrismaService } from 'prisma/prisma.service';
 
 @Injectable()
 export class StoresService {
-  constructor(private readonly prisma: PrismaService, private readonly cache: CatalogCache) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cache: CatalogCache,
+    @Optional() private readonly config?: ConfigService,
+  ) {}
 
   async create(userId: number, dto: CreateStoreDto) {
     const user = await this.prisma.user.findUnique({
@@ -21,8 +28,10 @@ export class StoresService {
     }
 
     if (user.role !== UserRole.store_owner) {
-      throw new BadRequestException('User must be a store owner to create a store');
+      throw new ForbiddenException('User must be a store owner to create a store');
     }
+
+    this.validateFreeDeliveryThreshold(dto.freeDeliveryThreshold);
 
     const category = await this.prisma.storeCategory.findUnique({
       where: { categoryId: dto.categoryId },
@@ -54,7 +63,7 @@ export class StoresService {
   private async queryStores(query: QueryStoresDto) {
     const { categoryId, areaId, search, sortBy = StoreSortBy.RATING, page = 1, limit = 20 } = query;
 
-    const where: any = { status: 'ACTIVE' };
+    const where: Prisma.StoreWhereInput = { status: 'ACTIVE' };
 
     if (categoryId) where.categoryId = categoryId;
     if (areaId) where.areaId = areaId;
@@ -66,7 +75,7 @@ export class StoresService {
       ];
     }
 
-    let orderBy: any = {};
+    let orderBy: Prisma.StoreOrderByWithRelationInput = {};
     switch (sortBy) {
       case StoreSortBy.RATING:
         orderBy = { avgRating: 'desc' };
@@ -140,6 +149,24 @@ export class StoresService {
     return result;
   }
 
+  async updateMonetization(storeId: number, dto: StoreMonetizationDto) {
+    try {
+      const updated = await this.prisma.store.update({
+        where: { storeId },
+        data: {
+          ...(dto.planTier !== undefined && { planTier: dto.planTier }),
+          ...(dto.commissionBps !== undefined && { commissionBps: dto.commissionBps }),
+        },
+        include: { storeCategory: true },
+      });
+      await this.cache.invalidate();
+      return updated;
+    } catch (error) {
+      if (error.code === 'P2025') throw new NotFoundException('Store not found');
+      throw error;
+    }
+  }
+
   async findOne(storeId: number) {
     const store = await this.prisma.store.findUnique({
       where: { storeId, status: 'ACTIVE' },
@@ -178,14 +205,25 @@ export class StoresService {
     return store;
   }
 
-  async update(userId: number, storeId: number, dto: Partial<CreateStoreDto>) {
+  async update(userId: number, storeId: number, dto: UpdateStoreDto) {
     await this.assertOwnership(userId, storeId);
+    this.validateFreeDeliveryThreshold(dto.freeDeliveryThreshold);
     const updated = await this.prisma.store.update({
       where: { storeId },
       data: dto,
     });
     await this.cache.invalidate();
     return updated;
+  }
+
+  private validateFreeDeliveryThreshold(threshold: number | null | undefined) {
+    if (threshold === undefined || threshold === null) return;
+    const driverFee = Number(this.config?.get('DRIVER_FEE_ILS') ?? 0);
+    if (Number.isFinite(driverFee) && driverFee > 0 && threshold < driverFee) {
+      throw new BadRequestException(
+        `الحد الأدنى للتوصيل المجاني (${threshold}) يجب أن يكون أكبر من أو يساوي رسوم السائق (${driverFee}).`,
+      );
+    }
   }
 
   async toggleStatus(userId: number, storeId: number, isOpenNow: boolean) {

@@ -8,7 +8,18 @@ export type Cart = {
   estimatedMin: string | null;
   estimatedMax: string | null;
   needsReview?: boolean;
-  store?: { storeName: string; storeNameAr?: string | null } | null;
+  store?: {
+    storeName: string;
+    storeNameAr?: string | null;
+    planTier?: 'FREE' | 'PRO';
+    latitude?: string | number | null;
+    longitude?: string | number | null;
+    deliveryRangeKm?: string | number | null;
+    minOrderAmount?: string | number | null;
+    deliveryBaseFee?: string | number | null;
+    deliveryPerKmFee?: string | number | null;
+    freeDeliveryThreshold?: string | number | null;
+  } | null;
   products?: (Pick<Product, 'productId' | 'nameAr' | 'imageUrl' | 'unitAr' | 'estimatedPriceMin' | 'estimatedPriceMax' | 'isPriceFixed' | 'productOptions'> & { isAvailable: boolean })[];
 };
 

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   Store,
   MapPin,
@@ -8,6 +9,8 @@ import {
   CheckCircle2,
   Search,
   RefreshCw,
+  Landmark,
+  Wallet,
 } from 'lucide-react';
 import { ApiError, api, json } from '../../shared/api/client';
 import Products from './store-products';
@@ -18,8 +21,18 @@ import { useResource } from '../../shared/hooks/use-resource';
 import { Pager } from '../../shared/ui/pager';
 import { StoreDeliveryPartners } from './delivery-partners';
 import { deliveryAreas as governorates } from '../../shared/lib/delivery-areas';
+import { money } from '../../shared/lib/money';
+import { formatBpsPct, normalizeDigits, PLATFORM_BANK_PHONE } from '../../shared/lib/numbers';
+import { AddressMap } from '../addresses/address-map';
+import '../addresses/addresses.css';
+import '../orders/payment.css';
 
 export default function OwnerStores() {
+  const [params] = useSearchParams();
+  return params.get('tab') === 'finance' ? <MerchantFinance /> : <OwnerStoresDirectory />;
+}
+
+function OwnerStoresDirectory() {
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('all');
@@ -39,8 +52,12 @@ export default function OwnerStores() {
       ),
     'owner-categories',
   );
+  const normalizedQuery = normalizeDigits(query.trim()).toLowerCase();
   const matchesStore = (store: ManagedStore) =>
-    (store.storeNameAr || store.storeName || '').includes(query.trim()) &&
+    (!normalizedQuery ||
+      normalizeDigits(`${store.storeNameAr ?? ''} ${store.storeName ?? ''} ${store.fullAddressAr ?? ''}`)
+        .toLowerCase()
+        .includes(normalizedQuery)) &&
     (filter === 'all' ||
       (filter === 'other'
         ? !['ACTIVE', 'PENDING_APPROVAL'].includes(store.status)
@@ -125,9 +142,14 @@ export default function OwnerStores() {
                 <h2>متاجري</h2>
                 <p>إدارة المتاجر وحالة ظهورها للعملاء</p>
               </div>
-              <button className="secondary" onClick={state.reload}>
-                <RefreshCw size={16} /> تحديث
-              </button>
+              <div className="owner-heading-actions">
+                <Link className="secondary button" to="/operations?tab=finance">
+                  <Wallet size={16} aria-hidden="true" /> الأرباح والعمولات
+                </Link>
+                <button className="secondary" onClick={state.reload}>
+                  <RefreshCw size={16} /> تحديث
+                </button>
+              </div>
             </div>
             <div className="owner-toolbar">
               <label className="owner-search">
@@ -153,6 +175,11 @@ export default function OwnerStores() {
                 </select>
               </label>
             </div>
+            {(normalizedQuery || filter !== 'all') && (
+              <p role="status">
+                يعرض {rows.filter(matchesStore).length} من أصل {rows.length} متجر في هذه الصفحة.
+              </p>
+            )}
             <div className="owner-store-grid">
               {rows.filter(matchesStore).map((store) => (
                 <article
@@ -176,7 +203,18 @@ export default function OwnerStores() {
                         (c) => c.categoryId === store.categoryId,
                       )?.nameAr ||
                       'متجر'}
+                    {' · '}
+                    <span className={`plan-badge ${store.planTier === 'PRO' ? 'is-pro' : ''}`}>
+                      {store.planTier === 'PRO' ? 'باقة PRO' : 'الباقة المجانية'}
+                    </span>
                   </p>
+                  {(store.deliveryBaseFee != null || store.deliveryPerKmFee != null || store.freeDeliveryThreshold != null) && (
+                    <p className="owner-store-category">
+                      توصيل: {money(store.deliveryBaseFee ?? 0)}
+                      {Number(store.deliveryPerKmFee ?? 0) > 0 ? ` + ${money(store.deliveryPerKmFee ?? 0)} / كم` : ''}
+                      {store.freeDeliveryThreshold != null ? ` · مجاني فوق ${money(store.freeDeliveryThreshold)}` : ''}
+                    </p>
+                  )}
                   <p className="owner-location">
                     <MapPin size={16} aria-hidden="true" />
                     {[
@@ -201,6 +239,14 @@ export default function OwnerStores() {
                     ) : (
                       'متجرك غير ظاهر للعملاء حاليًا. راجع حالة اعتماده.'
                     )}
+                  </div>
+                  <div className="owner-bank-chip">
+                    <Landmark size={15} aria-hidden="true" />
+                    <span>
+                      بنك فلسطين:{' '}
+                      <strong dir="ltr">{store.bankTransferPhone || PLATFORM_BANK_PHONE}</strong>{' '}
+                      ({store.bankTransferPhone && store.bankTransferPhone !== PLATFORM_BANK_PHONE ? 'رقم المتجر' : 'رقم المنصة الافتراضي'})
+                    </span>
                   </div>
                   <button
                     className="owner-products-button"
@@ -281,6 +327,22 @@ function StoreForm({
   reload: () => void;
 }) {
   const [saved, setSaved] = useState(false);
+  const [latText, setLatText] = useState(String(store?.latitude ?? ''));
+  const [lngText, setLngText] = useState(String(store?.longitude ?? ''));
+  const addressRef = useRef<HTMLInputElement>(null);
+
+  const parsedLat = Number(normalizeDigits(latText.trim()));
+  const parsedLng = Number(normalizeDigits(lngText.trim()));
+  const mapPoint =
+    latText.trim() !== '' &&
+    lngText.trim() !== '' &&
+    Number.isFinite(parsedLat) &&
+    Number.isFinite(parsedLng) &&
+    Math.abs(parsedLat) <= 90 &&
+    Math.abs(parsedLng) <= 180
+      ? { lat: parsedLat, lng: parsedLng }
+      : undefined;
+
   return (
     <div className="owner-store-form">
       <ActionForm
@@ -296,21 +358,49 @@ function StoreForm({
             latitude,
             longitude,
             deliveryRangeKm,
+            deliveryBaseFee,
+            deliveryPerKmFee,
+            freeDeliveryThreshold,
           } = Object.fromEntries(data);
-          const hasLatitude = String(latitude ?? '').trim() !== '';
-          const hasLongitude = String(longitude ?? '').trim() !== '';
+          const latClean = normalizeDigits(String(latitude ?? '')).trim();
+          const lngClean = normalizeDigits(String(longitude ?? '')).trim();
+          const hasLatitude = latClean !== '';
+          const hasLongitude = lngClean !== '';
           if (hasLatitude !== hasLongitude) throw new ApiError(400, 'أدخل خط العرض وخط الطول معاً لتحديد موقع المتجر.');
+          const latNum = hasLatitude ? Number(latClean) : null;
+          const lngNum = hasLongitude ? Number(lngClean) : null;
+          if (hasLatitude && (!Number.isFinite(latNum) || Math.abs(latNum!) > 90 || !Number.isFinite(lngNum) || Math.abs(lngNum!) > 180)) {
+            throw new ApiError(400, 'أدخل إحداثيات صالحة لخط العرض وخط الطول.');
+          }
+          const numOrNull = (raw: FormDataEntryValue | undefined) => {
+            const text = normalizeDigits(String(raw ?? '')).trim();
+            return text === '' ? null : Number(text);
+          };
+          const baseFeeVal = numOrNull(deliveryBaseFee);
+          const perKmVal = numOrNull(deliveryPerKmFee);
+          const freeThresholdVal = numOrNull(freeDeliveryThreshold);
+          const rangeText = normalizeDigits(String(deliveryRangeKm ?? '')).trim();
+          const bankPhone = normalizeDigits(String(data.get('bankTransferPhone') ?? '')).trim();
+          const hadCoords = store?.latitude != null || store?.longitude != null;
           await api(
             store ? `/stores/${store.storeId}` : '/stores',
             json(store ? 'PATCH' : 'POST', {
               storeName,
               storeNameAr,
               descriptionAr,
+              bankTransferPhone: bankPhone || null,
               categoryId: Number(categoryId),
               areaId: Number(areaId),
               fullAddressAr,
-              ...(hasLatitude && { latitude: Number(latitude), longitude: Number(longitude) }),
-              ...(String(deliveryRangeKm ?? '').trim() && { deliveryRangeKm: Number(deliveryRangeKm) }),
+              ...(hasLatitude
+                ? { latitude: latNum, longitude: lngNum }
+                : store && hadCoords
+                  ? { latitude: null, longitude: null }
+                  : {}),
+              ...(rangeText && { deliveryRangeKm: Number(rangeText) }),
+              ...(baseFeeVal !== null || store?.deliveryBaseFee != null ? { deliveryBaseFee: baseFeeVal } : {}),
+              ...(perKmVal !== null || store?.deliveryPerKmFee != null ? { deliveryPerKmFee: perKmVal } : {}),
+              ...(freeThresholdVal !== null || store?.freeDeliveryThreshold != null ? { freeDeliveryThreshold: freeThresholdVal } : {}),
             }),
           );
           setSaved(true);
@@ -354,7 +444,7 @@ function StoreForm({
           <span>02</span>
           <div>
             <h3>موقع المتجر</h3>
-            <p>اختر المحافظة وأدخل عنوانًا واضحًا يسهل الوصول إليه.</p>
+            <p>اختر المحافظة وأدخل عنوانًا واضحًا، ثم حدّد موقع المتجر على الخريطة أو بالإحداثيات.</p>
           </div>
         </div>
         <label>
@@ -378,21 +468,226 @@ function StoreForm({
             ))}
           </select>
         </label>
-        <Field
-          label="العنوان"
-          name="fullAddressAr"
-          defaultValue={store?.fullAddressAr ?? store?.fullAddress ?? ''}
-        />
-        <p>انسخ إحداثيات موقع المتجر الفعلي من Google Maps. يُحسب نطاق التوصيل من هذا الموقع إلى عنوان العميل.</p>
-        <Field label="خط العرض للمتجر" name="latitude" type="number" min={-90} max={90} step="0.00000001" defaultValue={String(store?.latitude ?? '')} required={false} />
-        <Field label="خط الطول للمتجر" name="longitude" type="number" min={-180} max={180} step="0.00000001" defaultValue={String(store?.longitude ?? '')} required={false} />
+        <label>
+          العنوان
+          <input
+            ref={addressRef}
+            name="fullAddressAr"
+            type="text"
+            required
+            defaultValue={store?.fullAddressAr ?? store?.fullAddress ?? ''}
+          />
+        </label>
+        <div className="owner-field-full">
+          <AddressMap
+            point={mapPoint}
+            onChange={(next) => {
+              setLatText(String(next.lat));
+              setLngText(String(next.lng));
+            }}
+            onArea={(_area, street) => {
+              if (street && addressRef.current && !addressRef.current.value.trim()) {
+                addressRef.current.value = street;
+              }
+            }}
+          />
+          <small>
+            حرّك الخريطة أو استخدم «موقعي الحالي»، أو أدخل خط العرض والطول يدويًا. يُحسب نطاق التوصيل من هذا الموقع إلى عنوان العميل.
+          </small>
+        </div>
+        <label>
+          خط العرض للمتجر
+          <input
+            name="latitude"
+            type="text"
+            inputMode="decimal"
+            dir="ltr"
+            value={latText}
+            onChange={(e) => setLatText(e.target.value)}
+          />
+        </label>
+        <label>
+          خط الطول للمتجر
+          <input
+            name="longitude"
+            type="text"
+            inputMode="decimal"
+            dir="ltr"
+            value={lngText}
+            onChange={(e) => setLngText(e.target.value)}
+          />
+        </label>
+        {(latText || lngText) && (
+          <div className="owner-field-full">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                setLatText('');
+                setLngText('');
+              }}
+            >
+              مسح إحداثيات الموقع
+            </button>
+          </div>
+        )}
         <Field label="نطاق التوصيل بالكيلومتر" name="deliveryRangeKm" type="number" min={0} max={999.99} step="0.01" defaultValue={String(store?.deliveryRangeKm ?? 10)} />
+        <div className="owner-form-heading">
+          <span>03</span>
+          <div>
+            <h3>إعدادات الدفع — بنك فلسطين</h3>
+            <p>ضع رقم التحويل الخاص بمتجرك، أو اتركه فارغاً لاستخدام رقم المنصة.</p>
+          </div>
+        </div>
+        <div className="owner-field-full">
+          <Field
+            label="رقم التحويل عبر بنك فلسطين"
+            name="bankTransferPhone"
+            type="tel"
+            pattern="0(59|56)[0-9٠-٩۰-۹]{7}"
+            defaultValue={store?.bankTransferPhone ?? ''}
+            required={false}
+          />
+          <small>
+            صيغة الرقم: 10 أرقام تبدأ بـ 059 أو 056. عند تركه فارغاً يُستخدم رقم المنصة المعتمد <strong dir="ltr">{PLATFORM_BANK_PHONE}</strong>، وعند تخصيصه يمكنك التحقق من وصول الحوالات ومطابقتها مباشرة.
+          </small>
+        </div>
+        <div className="owner-form-heading">
+          <span>04</span>
+          <div>
+            <h3>تسعير التوصيل والحد المجاني</h3>
+            <p>حدّد رسوم التوصيل الخاصة بمتجرك، أو اتركها فارغة لاستخدام الإعدادات الافتراضية.</p>
+          </div>
+        </div>
+        <Field label="رسوم التوصيل الأساسية (شيكل)" name="deliveryBaseFee" type="number" min={0} max={1000} step="0.01" defaultValue={String(store?.deliveryBaseFee ?? '')} required={false} />
+        <Field label="رسوم التوصيل لكل كيلومتر (شيكل)" name="deliveryPerKmFee" type="number" min={0} max={500} step="0.01" defaultValue={String(store?.deliveryPerKmFee ?? '')} required={false} />
+        <div className="owner-field-full">
+          <Field label="حد التوصيل المجاني بالشيكل (اختياري)" name="freeDeliveryThreshold" type="number" min={0} max={100000} step="0.01" defaultValue={String(store?.freeDeliveryThreshold ?? '')} required={false} />
+        </div>
       </ActionForm>
       {saved && (
         <p className="owner-success" role="status">
           تم حفظ بيانات المتجر بنجاح.
         </p>
       )}
+    </div>
+  );
+}
+
+type MerchantSummary = {
+  totals: {
+    totalOrders: number;
+    deliveredOrders: number;
+    bankTransferOrders: number;
+    cashOrders: number;
+    grossSales: string;
+    netStoreEarnings: string;
+    platformFees: string;
+    deliveryFeesTotal: string;
+    pendingStorePayout: string;
+    pendingDirectBankHandover: string;
+  };
+  config: {
+    defaultCommissionBps: number;
+    proCommissionDiscountBps: number;
+    bankTransferPointsPerOrder: number;
+    cashPointsPerOrder: number;
+  };
+  stores: {
+    storeId: number;
+    storeName: string;
+    storeNameAr: string;
+    status: string;
+    planTier: 'FREE' | 'PRO';
+    commissionBps: number | null;
+    categoryNameAr: string;
+    effectiveCommissionBps: number;
+    deliveredOrders: number;
+    grossSales: string;
+    netEarnings: string;
+    platformFees: string;
+  }[];
+};
+
+function MerchantFinance() {
+  const state = useResource(
+    signal => api<MerchantSummary>('/finance/merchant-summary', { signal }),
+    'merchant-finance-summary',
+  );
+  return (
+    <div className="stack owner-dashboard">
+      <div className="owner-section-heading">
+        <div>
+          <h2>ملخص الأرباح والعمولات</h2>
+          <p>إجمالي المبيعات المسلمة، صافي مستحقات متاجرك، والباقة المطبقة لكل متجر.</p>
+        </div>
+        <div className="owner-heading-actions">
+          <Link className="secondary button" to="/operations">العودة إلى متاجري</Link>
+          <button type="button" className="secondary" onClick={state.reload}>
+            <RefreshCw size={16} /> تحديث
+          </button>
+        </div>
+      </div>
+      <Result state={state}>
+        {summary => (
+          <>
+            <div className="business-kpis">
+              <article className="surface padded">
+                <span>إجمالي المبيعات المُسلّمة</span>
+                <strong>{money(summary.totals.grossSales)}</strong>
+              </article>
+              <article className="surface padded">
+                <span>صافي مستحقات المتاجر</span>
+                <strong>{money(summary.totals.netStoreEarnings)}</strong>
+              </article>
+              <article className="surface padded">
+                <span>عمولات ورسوم المنصة</span>
+                <strong>{money(summary.totals.platformFees)}</strong>
+              </article>
+              <article className="surface padded">
+                <span>بانتظار التسوية والتحويل</span>
+                <strong>{money(summary.totals.pendingStorePayout)}</strong>
+              </article>
+            </div>
+            <div className="surface padded stack">
+              <div className="bop-receipt-meta">
+                <span>إجمالي الطلبات: {summary.totals.totalOrders}</span>
+                <span>الطلبات المُسلّمة: {summary.totals.deliveredOrders}</span>
+                <span>طلبات بنك فلسطين: {summary.totals.bankTransferOrders}</span>
+                <span>طلبات نقدية: {summary.totals.cashOrders}</span>
+                <span>إجمالي رسوم التوصيل: {money(summary.totals.deliveryFeesTotal)}</span>
+                {Number(summary.totals.pendingDirectBankHandover) > 0 && (
+                  <span>حوالات مباشرة بحاجة لتوريد/تسوية: {money(summary.totals.pendingDirectBankHandover)}</span>
+                )}
+              </div>
+              <small>
+                يحصل العملاء على {summary.config.bankTransferPointsPerOrder} نقطة ولاء عند الدفع عبر بنك فلسطين مقابل {summary.config.cashPointsPerOrder} نقاط للدفع عند الاستلام.
+              </small>
+            </div>
+            <div className="owner-store-grid">
+              {summary.stores.map(store => (
+                <article key={store.storeId} className="surface padded stack">
+                  <div className="owner-store-top">
+                    <h3>{store.storeNameAr || store.storeName}</h3>
+                    <span className={`plan-badge ${store.planTier === 'PRO' ? 'is-pro' : ''}`}>
+                      {store.planTier === 'PRO' ? 'باقة PRO' : 'الباقة المجانية'}
+                    </span>
+                  </div>
+                  <p className="owner-store-category">
+                    {store.categoryNameAr} · العمولة المطبقة: {formatBpsPct(store.effectiveCommissionBps)} ({store.effectiveCommissionBps} نقطة أساس)
+                  </p>
+                  <div className="bop-receipt-meta">
+                    <span>الطلبات المُسلّمة: {store.deliveredOrders}</span>
+                    <span>المبيعات: {money(store.grossSales)}</span>
+                    <span>صافي أرباحك: {money(store.netEarnings)}</span>
+                    <span>رسوم المنصة: {money(store.platformFees)}</span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </>
+        )}
+      </Result>
     </div>
   );
 }

@@ -37,7 +37,7 @@ cd apps/api
 npm ci
 ```
 
-Run the NestJS commands below from `apps/api`. For the frontend, open a separate terminal in `apps/web`, run `npm ci`, then `npm run dev`. The development frontend proxies the API to port 5050.
+Run the NestJS commands below from `apps/api`. For the frontend, open a separate terminal in `apps/web`, run `npm ci`, then `npm run dev`. This waits up to one minute for the API on port 5050 to report readiness before starting Vite. For isolated UI work with mocked API responses, use `npm run dev:ui`.
 
 Run Docker Compose from the repository root. To serve the web application and API on the same origin, run `docker compose -f compose.yaml -f compose.frontend.yaml up --build -d` and open http://localhost:5050.
 
@@ -56,9 +56,11 @@ $ npm run start:prod
 
 ## Run tests
 
+Use Node.js 22.x LTS for backend tests, including on Windows. Check `node --version` before running the suite. The root `.nvmrc` selects Node 22 in version managers that support it, and the unit runner reports a clear error for other major versions.
+
 ```bash
 # unit tests
-$ npm run test
+$ npm test -- --runInBand
 
 # e2e tests
 $ E2E_ALLOW_DATABASE=1 npm run test:e2e
@@ -67,7 +69,19 @@ $ E2E_ALLOW_DATABASE=1 npm run test:e2e
 $ npm run test:cov
 ```
 
+Use `npm test -- --runInBand --logHeapUsage` when diagnosing memory use in the unit suite.
+
 Use a dedicated non-root MySQL account and a local database ending in `_test` for API E2E. When a container is the test host, set `E2E_DATABASE_HOST` to its isolated DNS name. Environment variables take precedence over `.env.test`.
+
+Run the CI browser smoke test from the repository root with Docker running and Node 22 available.
+
+```bash
+npm ci --prefix apps/web
+npm --prefix apps/web exec -- playwright install chromium
+bash infra/compose-smoke.sh
+```
+
+The smoke test uses an isolated Compose project on loopback port 15050. It builds the API and storefront images, applies migrations, checks profile media in MinIO, and runs a cash order through checkout and delivery on both browser profiles. Use `PLAYWRIGHT_CROSS_BROWSER=1` for the mocked frontend suite after installing Chromium, Firefox, and WebKit.
 
 ## Deployment
 

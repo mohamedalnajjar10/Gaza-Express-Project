@@ -44,13 +44,13 @@ describe('S3 image storage', () => {
     });
   });
   it.each([
-    Buffer.from('not an image'),
-    Buffer.from(
+    ['non-image bytes', () => Buffer.from('not an image')],
+    ['SVG images', () => Buffer.from(
       '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>',
-    ),
-    Buffer.alloc(IMAGE_UPLOAD_LIMIT + 1),
-  ])('rejects invalid or oversized uploads', async (bytes) => {
-    await expect(storage.upload(bytes)).rejects.toBeInstanceOf(
+    )],
+    ['oversized uploads', () => Buffer.alloc(IMAGE_UPLOAD_LIMIT + 1)],
+  ] as const)('rejects %s', async (_label, createInput) => {
+    await expect(storage.upload(createInput())).rejects.toBeInstanceOf(
       BadRequestException,
     );
     expect(client.send).not.toHaveBeenCalled();

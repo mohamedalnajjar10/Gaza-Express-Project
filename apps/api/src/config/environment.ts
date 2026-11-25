@@ -1,3 +1,21 @@
+function parseIntegerInRange(env: Record<string, unknown>, key: string, min: number, max: number) {
+  const value = env[key];
+  if (value === undefined) return;
+  const raw = String(value);
+  const parsed = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`Expected integer in [${min}, ${max}] for ${key}`);
+  }
+}
+
+function parseNonNegativeMoney(env: Record<string, unknown>, key: string) {
+  const value = env[key];
+  if (value === undefined) return;
+  if (!/^\d+(?:\.\d{1,2})?$/.test(String(value))) {
+    throw new Error(`Expected non-negative 2-decimal number for ${key}`);
+  }
+}
+
 export function validateEnvironment(env: Record<string, unknown>) {
   for (const key of ['DATABASE_URL', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'REDIS_URL']) {
     if (typeof env[key] !== 'string' || !env[key]) throw new Error(`Missing configuration: ${key}`);
@@ -8,6 +26,21 @@ export function validateEnvironment(env: Record<string, unknown>) {
     if (value !== undefined && (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value)) || Number(value) < 1)) {
       throw new Error(`Expected a positive integer: ${key}`);
     }
+  }
+  for (const key of ['PLATFORM_COMMISSION_BPS', 'PRO_COMMISSION_DISCOUNT_BPS']) {
+    parseIntegerInRange(env, key, 0, 5000);
+  }
+  parseIntegerInRange(env, 'DELIVERY_PLATFORM_CUT_BPS', 0, 10000);
+  for (const key of ['DRIVER_FEE_ILS', 'DELIVERY_BASE_FEE_ILS', 'DELIVERY_PER_KM_FEE_ILS']) {
+    parseNonNegativeMoney(env, key);
+  }
+  if (env.PLATFORM_BANK_TRANSFER_PHONE !== undefined && env.PLATFORM_BANK_TRANSFER_PHONE !== '') {
+    if (!/^0(?:59|56)\d{7}$/.test(String(env.PLATFORM_BANK_TRANSFER_PHONE))) {
+      throw new Error('Invalid PLATFORM_BANK_TRANSFER_PHONE');
+    }
+  }
+  if (env.DELIVERY_CODE_SECRET !== undefined && (typeof env.DELIVERY_CODE_SECRET !== 'string' || !env.DELIVERY_CODE_SECRET.trim())) {
+    throw new Error('DELIVERY_CODE_SECRET must not be empty');
   }
   if (env.NODE_ENV === 'test' && !db.pathname.endsWith('_test')) throw new Error('Tests require a dedicated _test database');
   if (env.LOAD_TEST_MODE === '1' && (env.NODE_ENV !== 'test' || db.pathname !== '/wasla_load_test')) {
@@ -24,6 +57,19 @@ export function validateEnvironment(env: Record<string, unknown>) {
     }
   }
   if (env.NODE_ENV === 'production') {
+    if (typeof env.CORS_ORIGIN !== 'string' || !env.CORS_ORIGIN.trim()) {
+      throw new Error('CORS_ORIGIN is required in production');
+    }
+    const origins = env.CORS_ORIGIN.split(',').map(origin => origin.trim()).filter(Boolean);
+    if (!origins.length) throw new Error('CORS_ORIGIN must contain at least one origin');
+    for (const origin of origins) {
+      let parsed: URL;
+      try { parsed = new URL(origin); }
+      catch { throw new Error(`Invalid CORS_ORIGIN URL: ${origin}`); }
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw new Error(`Invalid CORS_ORIGIN protocol: ${origin}`);
+      }
+    }
     if (smsMode !== 'disabled' && (typeof env.OTP_SIGNING_SECRET !== 'string' || env.OTP_SIGNING_SECRET.length < 64 || env.OTP_SIGNING_SECRET.startsWith('REPLACE_') || [env.JWT_SECRET, env.JWT_REFRESH_SECRET, env.SMS_OUTBOX_KEY].includes(env.OTP_SIGNING_SECRET))) throw new Error('Independent OTP_SIGNING_SECRET required');
     if (typeof env.DELIVERY_CODE_SECRET !== 'string' || env.DELIVERY_CODE_SECRET.length < 64 || env.DELIVERY_CODE_SECRET.startsWith('REPLACE_')) throw new Error('Strong DELIVERY_CODE_SECRET required');
     if (db.username === 'root') throw new Error('Production must not use the root account');

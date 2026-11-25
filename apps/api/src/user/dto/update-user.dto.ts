@@ -18,6 +18,11 @@ export class UpdateUserDto {
     @IsBoolean()
     is_verified?: boolean;
 
+    @ApiPropertyOptional({ description: 'Account active status' })
+    @ValidateIf((_object, value) => value !== undefined)
+    @IsBoolean()
+    is_active?: boolean;
+
     @ApiPropertyOptional({ example: 'Ahmed Mohamed' })
     @ValidateIf((_object, value) => value !== undefined)
     @IsString()

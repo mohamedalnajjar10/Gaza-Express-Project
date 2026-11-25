@@ -1,7 +1,8 @@
 import { PageDto } from 'src/common/dto/page.dto';
-import { Controller, Query, Get, Post, Body, Param, ParseIntPipe, UseGuards } from '@nestjs/common';
+import { Controller, Query, Get, Post, Patch, Body, Param, ParseIntPipe, UseGuards } from '@nestjs/common';
 import { StoreCategoriesService } from './store-categories.service';
 import { CreateStoreCategoryDto } from './dto/create-store-category.dto';
+import { UpdateStoreCategoryDto } from './dto/update-store-category.dto';
 import { RolesGuard } from 'src/common/guards/roles.guard';
 import { Roles } from 'src/common/decorators/roles.decorator';
 import { UserRole } from '@prisma/client';
@@ -34,5 +35,14 @@ export class StoreCategoriesController {
   @ApiOperation({ summary: 'Create store category (admin only)' })
   create(@Body() dto: CreateStoreCategoryDto) {
     return this.service.create(dto);
+  }
+
+  @Patch(':id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.admin)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Update store category (admin only)' })
+  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateStoreCategoryDto) {
+    return this.service.update(id, dto);
   }
 }

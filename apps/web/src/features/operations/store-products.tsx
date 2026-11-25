@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { Package, Search, Plus, Layers3 } from 'lucide-react';
+import { Package, Search, Plus, Layers3, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { api, ApiError, json } from '../../shared/api/client';
 import { useResource } from '../../shared/hooks/use-resource';
 import { money } from '../../shared/lib/money';
+import { normalizeDigits } from '../../shared/lib/numbers';
 import { ActionForm, Field } from '../../shared/ui/form';
-import { Empty, Result } from '../../shared/ui/feedback';
+import { Empty, ErrorBox, Result } from '../../shared/ui/feedback';
 import { Pager } from '../../shared/ui/pager';
-import type { Product } from '../catalog/types';
+import type { Option, Product } from '../catalog/types';
 import { ProductImage } from '../catalog/product-image';
 
 type Section = { prodCategoryId: number; nameAr: string; nameEn?: string; parentId?: number | null };
@@ -51,8 +52,12 @@ export default function Products({
     `products:${storeId}:${page}`,
   );
 
+  const normalizedQuery = normalizeDigits(query.trim()).toLowerCase();
   const matchesProduct = (p: ManagedProduct) =>
-    p.nameAr.includes(query.trim()) &&
+    (!normalizedQuery ||
+      normalizeDigits(`${p.nameAr} ${p.nameEn ?? ''}`)
+        .toLowerCase()
+        .includes(normalizedQuery)) &&
     (availability === 'all' ||
       p.isAvailable === (availability === 'available'));
   return (
@@ -206,6 +211,11 @@ export default function Products({
                 </select>
               </label>
             </div>
+            {(normalizedQuery || availability !== 'all') && (
+              <p role="status">
+                يعرض {rows.filter(matchesProduct).length} من أصل {rows.length} منتج في هذه الصفحة.
+              </p>
+            )}
             <div className="grid owner-product-grid">
               {rows.filter(matchesProduct).map((product) => (
                 <article
@@ -246,6 +256,17 @@ export default function Products({
                         />
                       )}
                     </Result>
+                  </details>
+                  <details>
+                    <summary>
+                      <SlidersHorizontal size={16} aria-hidden="true" />{' '}
+                      خيارات المنتج ({product.productOptions?.length ?? 0})
+                    </summary>
+                    <ProductOptionsManager
+                      productId={product.productId}
+                      options={product.productOptions ?? []}
+                      reload={products.reload}
+                    />
                   </details>
                 </article>
               ))}
@@ -321,19 +342,25 @@ function ProductForm({
               400,
               'أدخل اسم المنتج بالعربية والإنجليزية، بحرفين على الأقل لكل اسم.',
             );
-          if (fixed)
-            data.set(
-              'estimatedPriceMax',
-              String(data.get('estimatedPriceMin')),
-            );
-          if (
-            Number(data.get('estimatedPriceMax')) <
-            Number(data.get('estimatedPriceMin'))
-          )
-            throw new ApiError(
-              400,
-              'السعر الأعلى يجب أن يساوي السعر الأدنى أو يتجاوزه.',
-            );
+          const minRaw = normalizeDigits(String(data.get('estimatedPriceMin') ?? '')).trim();
+          const minVal = Number(minRaw);
+          if (minRaw === '' || !Number.isFinite(minVal) || minVal < 0) {
+            throw new ApiError(400, 'أدخل السعر الأدنى للمنتج بشكل صحيح.');
+          }
+          data.set('estimatedPriceMin', String(minVal));
+          if (fixed) {
+            data.set('estimatedPriceMax', String(minVal));
+          } else {
+            const maxRaw = normalizeDigits(String(data.get('estimatedPriceMax') ?? '')).trim();
+            if (maxRaw === '') {
+              throw new ApiError(400, 'أدخل السعر الأعلى للمنتج غير ثابت السعر، أو فعّل خيار «السعر ثابت».');
+            }
+            const maxVal = Number(maxRaw);
+            if (!Number.isFinite(maxVal) || maxVal < minVal) {
+              throw new ApiError(400, 'السعر الأعلى يجب أن يساوي السعر الأدنى أو يتجاوزه.');
+            }
+            data.set('estimatedPriceMax', String(maxVal));
+          }
           if (!product) data.set('storeId', String(storeId));
           if (!data.get('prodCategoryId')) data.delete('prodCategoryId');
           data.set('isPriceFixed', String(fixed));
@@ -453,6 +480,7 @@ function ProductForm({
               max={99999999.99}
               step="0.01"
               defaultValue={product?.estimatedPriceMax}
+              required={false}
             />
           )}
         </div>
@@ -481,5 +509,149 @@ function ProductForm({
       </ActionForm>
       {saved > 0 && <p role="status">تم حفظ المنتج.</p>}
     </>
+  );
+}
+
+function ProductOptionsManager({
+  productId,
+  options,
+  reload,
+}: {
+  productId: number;
+  options: Option[];
+  reload: () => void;
+}) {
+  const [createdKey, setCreatedKey] = useState(0);
+  const [notice, setNotice] = useState('');
+  const [actionError, setActionError] = useState<unknown>();
+
+  return (
+    <div className="stack">
+      {notice && <p role="status">{notice}</p>}
+      {actionError ? <ErrorBox error={actionError} /> : null}
+      {options.length ? (
+        <ul className="stack">
+          {options.map((option) => (
+            <li key={option.optionId} className="surface padded stack">
+              <div className="owner-product-meta">
+                <strong>{option.optionNameAr || option.optionName}</strong>
+                <span className={`owner-status ${option.isAvailable ? 'is-active' : ''}`}>
+                  {option.isAvailable ? 'متاح' : 'غير متاح'}
+                </span>
+              </div>
+              <small>
+                {option.optionName} ·{' '}
+                {Number(option.extraCost) > 0
+                  ? `+${money(option.extraCost)}`
+                  : 'بدون تكلفة إضافية'}
+              </small>
+              <div className="owner-heading-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={async () => {
+                    setActionError(undefined);
+                    try {
+                      await api(`/products/${productId}/options/${option.optionId}`, json('PATCH', {
+                        isAvailable: !option.isAvailable,
+                      }));
+                      setNotice(`تم تحديث توفر الخيار «${option.optionNameAr || option.optionName}».`);
+                      reload();
+                    } catch (err) {
+                      setActionError(err);
+                    }
+                  }}
+                >
+                  {option.isAvailable ? 'تعطيل الخيار' : 'تفعيل الخيار'}
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={async () => {
+                    setActionError(undefined);
+                    try {
+                      await api(`/products/${productId}/options/${option.optionId}`, {
+                        method: 'DELETE',
+                      });
+                      setNotice(`تم حذف الخيار «${option.optionNameAr || option.optionName}».`);
+                      reload();
+                    } catch (err) {
+                      setActionError(err);
+                    }
+                  }}
+                >
+                  <Trash2 size={14} aria-hidden="true" /> حذف
+                </button>
+              </div>
+              <details>
+                <summary>تعديل الخيار</summary>
+                <ActionForm
+                  label="حفظ تعديل الخيار"
+                  submit={async (data) => {
+                    const optionName = String(data.get('optionName') ?? '').trim();
+                    const optionNameAr = String(data.get('optionNameAr') ?? '').trim();
+                    const extraRaw = normalizeDigits(String(data.get('extraCost') ?? '0')).trim();
+                    const extraCost = Number(extraRaw || '0');
+                    if (!optionName) throw new ApiError(400, 'أدخل اسم الخيار بالإنجليزية.');
+                    if (!Number.isFinite(extraCost) || extraCost < 0) {
+                      throw new ApiError(400, 'أدخل تكلفة إضافية صالحة.');
+                    }
+                    await api(`/products/${productId}/options/${option.optionId}`, json('PATCH', {
+                      optionName,
+                      optionNameAr: optionNameAr || null,
+                      extraCost,
+                      isAvailable: data.has('isAvailable'),
+                    }));
+                    setNotice(`تم حفظ تعديل الخيار «${optionNameAr || optionName}».`);
+                    reload();
+                  }}
+                >
+                  <Field label="اسم الخيار بالعربية (اختياري)" name="optionNameAr" defaultValue={option.optionNameAr ?? ''} maxLength={191} required={false} />
+                  <Field label="اسم الخيار بالإنجليزية" name="optionName" defaultValue={option.optionName} maxLength={191} />
+                  <Field label="التكلفة الإضافية (₪)" name="extraCost" type="number" min={0} max={999999.99} step="0.01" defaultValue={String(option.extraCost ?? '0')} required={false} />
+                  <label className="check">
+                    <input type="checkbox" name="isAvailable" defaultChecked={option.isAvailable} />
+                    متاح للاختيار
+                  </label>
+                </ActionForm>
+              </details>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>لا توجد خيارات إضافية لهذا المنتج بعد.</p>
+      )}
+      <ActionForm
+        key={createdKey}
+        label="إضافة خيار للمنتج"
+        submit={async (data) => {
+          const optionName = String(data.get('optionName') ?? '').trim();
+          const optionNameAr = String(data.get('optionNameAr') ?? '').trim();
+          const extraRaw = normalizeDigits(String(data.get('extraCost') ?? '0')).trim();
+          const extraCost = Number(extraRaw || '0');
+          if (!optionName) throw new ApiError(400, 'أدخل اسم الخيار بالإنجليزية.');
+          if (!Number.isFinite(extraCost) || extraCost < 0) {
+            throw new ApiError(400, 'أدخل تكلفة إضافية صالحة.');
+          }
+          await api(`/products/${productId}/options`, json('POST', {
+            optionName,
+            ...(optionNameAr && { optionNameAr }),
+            extraCost,
+            isAvailable: data.has('isAvailable'),
+          }));
+          setCreatedKey((value) => value + 1);
+          setNotice(`تمت إضافة الخيار «${optionNameAr || optionName}».`);
+          reload();
+        }}
+      >
+        <Field label="اسم الخيار بالعربية (اختياري)" name="optionNameAr" maxLength={191} required={false} />
+        <Field label="اسم الخيار بالإنجليزية" name="optionName" maxLength={191} />
+        <Field label="التكلفة الإضافية (₪)" name="extraCost" type="number" min={0} max={999999.99} step="0.01" defaultValue="0" required={false} />
+        <label className="check">
+          <input type="checkbox" name="isAvailable" defaultChecked />
+          متاح للاختيار
+        </label>
+      </ActionForm>
+    </div>
   );
 }

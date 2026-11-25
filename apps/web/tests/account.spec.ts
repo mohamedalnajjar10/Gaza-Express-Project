@@ -6,7 +6,7 @@ for (const [role, label] of Object.entries({
   driver: 'سائق توصيل',
   admin: 'مدير النظام',
 })) {
-  test(`account profile and logout for ${role}`, async ({ page }, info) => {
+  test(`account profile and logout for ${role}`, async ({ page, browserName }, info) => {
     let loggedOut = false;
     let saves = 0;
     const avatar =
@@ -87,7 +87,7 @@ for (const [role, label] of Object.entries({
       .getByRole('button', { name: 'تسجيل الدخول', exact: true })
       .click();
     if (role === 'customer')
-      await page.getByRole('link', { name: 'حسابي', exact: true }).click();
+      await page.locator('.header-login').click();
     const account = page.locator('.account-page');
     await expect(
       account.getByRole('heading', { name: 'حسابي', exact: true }),
@@ -132,7 +132,7 @@ for (const [role, label] of Object.entries({
         mimeType: 'image/png',
         buffer: imageBytes,
       });
-    await page.screenshot({
+    if (browserName === 'chromium') await page.screenshot({
       path: info.outputPath('account-edit.png'),
       fullPage: true,
     });
@@ -155,7 +155,7 @@ for (const [role, label] of Object.entries({
     await expect(page.getByRole('banner').locator('.header-avatar img')).toBeVisible();
     await expect(page.getByRole('banner')).toContainText('أحمد الجديد');
     expect(saves).toBe(2);
-    await page.screenshot({
+    if (browserName === 'chromium') await page.screenshot({
       path: info.outputPath(`account-${role}.png`),
       fullPage: true,
     });

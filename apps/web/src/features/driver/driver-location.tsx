@@ -2,6 +2,28 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { api, json } from '../../shared/api/client';
 
 const locationPath = '/drivers/me/location';
+const SHARING_KEY = 'gaza-express.driver-location-sharing.v1';
+
+function readPersistedSharing() {
+  try {
+    return (
+      sessionStorage.getItem(SHARING_KEY) === 'true' &&
+      typeof navigator !== 'undefined' &&
+      Boolean(navigator.geolocation) &&
+      window.isSecureContext
+    );
+  } catch {
+    return false;
+  }
+}
+
+function writePersistedSharing(value: boolean) {
+  try {
+    if (value) sessionStorage.setItem(SHARING_KEY, 'true');
+    else sessionStorage.removeItem(SHARING_KEY);
+  } catch { /* storage unavailable */ }
+}
+
 const Sharing = createContext<{
   sharing: boolean;
   message: string;
@@ -10,10 +32,14 @@ const Sharing = createContext<{
 } | null>(null);
 
 export function DriverLocationProvider({ children }: { children: ReactNode }) {
-  const [sharing, setSharing] = useState(false);
+  const [sharing, setSharing] = useState(readPersistedSharing);
   const [stopping, setStopping] = useState(false);
   const [message, setMessage] = useState('');
   const update = useRef<Promise<unknown> | null>(null);
+
+  useEffect(() => {
+    writePersistedSharing(sharing);
+  }, [sharing]);
 
   useEffect(() => {
     if (!sharing) return;
@@ -21,13 +47,17 @@ export function DriverLocationProvider({ children }: { children: ReactNode }) {
     let locating = false;
 
     function publish() {
-      if (locating || document.visibilityState !== 'visible') return;
+      if (document.visibilityState !== 'visible') {
+        if (active) setMessage('توقّف تحديث الموقع مؤقتًا أثناء إخفاء الصفحة؛ سيُستأنف فور عودتك.');
+        return;
+      }
+      if (locating) return;
       locating = true;
       navigator.geolocation.getCurrentPosition(({ coords }) => {
         locating = false;
         if (!active) return;
         if (coords.accuracy > 1000) {
-          setMessage('دقة الموقع منخفضة. يمكنك اختيار منطقة التوصيل يدويًا.');
+          setMessage(`دقة الموقع منخفضة (${Math.round(coords.accuracy)} م). انتقل إلى مكان مكشوف أو اختر منطقة التوصيل يدويًا.`);
           return;
         }
         const request = api(locationPath, json('PUT', {
@@ -51,6 +81,10 @@ export function DriverLocationProvider({ children }: { children: ReactNode }) {
     }
 
     function refresh() {
+      if (document.visibilityState !== 'visible') {
+        if (active) setMessage('توقّف تحديث الموقع مؤقتًا أثناء إخفاء الصفحة؛ سيُستأنف فور عودتك.');
+        return;
+      }
       if (!update.current) publish();
     }
     publish();

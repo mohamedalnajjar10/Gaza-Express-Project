@@ -78,9 +78,9 @@ const catalogReads = new Set<object>([
 
 @Injectable()
 export class RateLimitGuard extends ThrottlerGuard {
+  private static readonly MAX_FALLBACK_KEYS = 5000;
   private readonly fallbackLogger = new Logger(RateLimitGuard.name);
-  private fallbackWindow = 0;
-  private fallbackCount = 0;
+  private readonly fallbackHits = new Map<string, { window: number; count: number }>();
   private nextFallbackLogAt = 0;
 
   protected override async handleRequest(props: ThrottlerRequest) {
@@ -88,18 +88,38 @@ export class RateLimitGuard extends ThrottlerGuard {
       return await super.handleRequest(props);
     } catch (error) {
       if (!(error instanceof ServiceUnavailableException) || !catalogReads.has(props.context.getHandler())) throw error;
-      const window = Math.floor(Date.now() / 1000);
-      if (window !== this.fallbackWindow) {
-        this.fallbackWindow = window;
-        this.fallbackCount = 0;
-        if (Date.now() >= this.nextFallbackLogAt) {
-          this.nextFallbackLogAt = Date.now() + 60_000;
-          this.fallbackLogger.warn('Catalog rate limiter using bounded local fallback');
-        }
+      const now = Date.now();
+      const window = Math.floor(now / 1000);
+      if (now >= this.nextFallbackLogAt) {
+        this.nextFallbackLogAt = now + 60_000;
+        this.fallbackLogger.warn('Catalog rate limiter using bounded per-IP local fallback');
       }
-      if (++this.fallbackCount > 30) {
+      const req = props.context.switchToHttp().getRequest<Request>();
+      const tracker = (await this.getTracker(req as unknown as Record<string, unknown>)) || req.ip || 'unknown';
+      const current = this.fallbackHits.get(tracker);
+      let count: number;
+      if (!current || current.window !== window) {
+        if (current) {
+          this.fallbackHits.delete(tracker);
+        } else if (this.fallbackHits.size >= RateLimitGuard.MAX_FALLBACK_KEYS) {
+          for (const [key, entry] of this.fallbackHits) {
+            if (entry.window !== window) this.fallbackHits.delete(key);
+            if (this.fallbackHits.size < RateLimitGuard.MAX_FALLBACK_KEYS) break;
+          }
+          if (this.fallbackHits.size >= RateLimitGuard.MAX_FALLBACK_KEYS) {
+            const oldestKey = this.fallbackHits.keys().next().value;
+            if (oldestKey !== undefined) this.fallbackHits.delete(oldestKey);
+          }
+        }
+        count = 1;
+        this.fallbackHits.set(tracker, { window, count });
+      } else {
+        count = current.count + 1;
+        current.count = count;
+      }
+      if (count > 30) {
         await this.throwThrottlingException(props.context, {
-          limit: 30, ttl: 1000, key: 'catalog-fallback', tracker: '', totalHits: this.fallbackCount,
+          limit: 30, ttl: 1000, key: `catalog-fallback:${tracker}`, tracker, totalHits: count,
           isBlocked: true, timeToExpire: 1, timeToBlockExpire: 1,
         });
       }

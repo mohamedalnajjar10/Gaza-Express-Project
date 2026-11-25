@@ -25,6 +25,7 @@ describe('Frontend HTTP contracts', () => {
   const tag = randomUUID().slice(0, 8);
   const password = 'FixturePassword7!';
   const phone = `059${randomInt(1000000, 9999999)}`;
+  const registrationPhones = [phone];
   const users: number[] = [];
   const stores: number[] = [];
   const storeCategories: number[] = [];
@@ -79,10 +80,11 @@ describe('Frontend HTTP contracts', () => {
       await db.store.deleteMany({ where: { storeId: { in: stores } } });
       await db.storeCategory.deleteMany({ where: { categoryId: { in: storeCategories } } });
       await db.category.deleteMany({ where: { id: { in: categories } } });
-      const otps = await db.otpCode.findMany({ where: { phone }, select: { otp_id: true } });
+      const registeredPhone = { in: registrationPhones };
+      const otps = await db.otpCode.findMany({ where: { phone: registeredPhone }, select: { otp_id: true } });
       await db.smsJob.deleteMany({ where: { otpId: { in: otps.map(otp => otp.otp_id) } } });
-      await db.otpCode.deleteMany({ where: { phone } });
-      await db.user.deleteMany({ where: { OR: [{ user_id: { in: users } }, { phone }, { email: `${tag}@example.invalid` }] } });
+      await db.otpCode.deleteMany({ where: { phone: registeredPhone } });
+      await db.user.deleteMany({ where: { OR: [{ user_id: { in: users } }, { phone: registeredPhone }, { email: `${tag}@example.invalid` }] } });
       await db.$disconnect();
     }
     await app?.close();
@@ -107,7 +109,7 @@ describe('Frontend HTTP contracts', () => {
 
   it('registers, resends, verifies, signs in, reads the profile and logs out', async () => {
     const signup = { phone, password, full_name: 'Endpoint fixture' };
-    await call('post', '/auth/register').send({ ...signup, role: 'admin' }).expect(400);
+    await call('post', '/auth/register').send({ phone, role: 'admin' }).expect(400);
     const registered = await call('post', '/auth/register').send({ phone }).expect(201);
     expect(registered.body.data).not.toHaveProperty('otp_id');
     const pending = await db.user.findUniqueOrThrow({ where: { phone } });
@@ -136,12 +138,40 @@ describe('Frontend HTTP contracts', () => {
     expect(profile.body.data).not.toHaveProperty('password_hash');
     await call('get', '/auth/profile').expect(401);
     await call('post', '/auth/logout', 'registered').send({ refresh_token: session.refresh_token }).expect(200);
+    await call('get', '/auth/profile', 'registered').expect(401);
     await call('post', '/auth/refresh').send({ refresh_token: session.refresh_token }).expect(401);
+    const rotatedLogin = (await call('post', '/auth/login').send({ phone, password }).expect(200)).body.data.tokens;
+    const rotated = (await call('post', '/auth/refresh').send({ refresh_token: rotatedLogin.refresh_token }).expect(200)).body.data.tokens;
+    await call('post', '/auth/refresh').send({ refresh_token: rotatedLogin.refresh_token }).expect(401);
+    tokens.set('registered', rotated.access_token);
+    await call('get', '/auth/profile', 'registered').expect(401);
+    await call('post', '/auth/refresh').send({ refresh_token: rotated.refresh_token }).expect(401);
     const beforeReset = (await call('post', '/auth/login').send({ phone, password }).expect(200)).body.data.tokens;
     await call('patch', `/users/${pending.user_id}`, 'admin').send({ password: 'Changed!Pass42' }).expect(200);
     tokens.set('registered', beforeReset.access_token);
     await call('get', '/auth/profile', 'registered').expect(401);
     await call('post', '/auth/refresh').send({ refresh_token: beforeReset.refresh_token }).expect(401);
+  });
+
+  it.each(['customer', 'store_owner', 'driver'] as const)('binds %s to the verified phone and uses it at login', async role => {
+    const phone = `056${randomInt(1000000, 9999999)}`;
+    registrationPhones.push(phone);
+    const signup = { phone, role };
+    await call('post', '/auth/register').send(signup).expect(201);
+    const pending = await db.user.findUniqueOrThrow({ where: { phone } });
+    expect(pending).toMatchObject({ pendingSignupRole: role, is_verified: false });
+    const challenge = await db.otpCode.findFirstOrThrow({ where: { phone }, orderBy: { otp_id: 'desc' } });
+    const job = await db.smsJob.findUniqueOrThrow({ where: { otpId: challenge.otp_id } });
+    const verification = { phone, password, full_name: 'Role fixture', code: app.get(SmsService).decrypt(job) };
+    await call('post', '/auth/verify-otp').send({ ...verification, role: role === 'driver' ? 'customer' : 'driver' }).expect(400);
+    await call('post', '/auth/verify-otp').send(verification).expect(200);
+    await call('post', '/auth/register').send({ phone, role: role === 'driver' ? 'customer' : 'driver' }).expect(201);
+    const account = await db.user.findUniqueOrThrow({ where: { phone }, include: { driverProfile: true } });
+    expect(account).toMatchObject({ role, pendingSignupRole: null, is_verified: true });
+    if (role === 'driver') expect(account.driverProfile).toMatchObject({ approved: false, available: false });
+    else expect(account.driverProfile).toBeNull();
+    const login = await call('post', '/auth/login').send({ phone, password }).expect(200);
+    expect(login.body.data.user).toMatchObject({ phone, role });
   });
 
   it('exercises Google initiation, callback and one-time exchange with a simulated provider', async () => {
@@ -181,6 +211,7 @@ describe('Frontend HTTP contracts', () => {
     users.push(id);
     await call('get', '/users?limit=1', 'admin').expect(200);
     await call('get', `/users/${id}`, 'admin').expect(200);
+    await call('patch', `/users/${id}`, 'admin').send({ full_name: null }).expect(400);
     await call('patch', `/users/${id}`, 'admin').send({ full_name: 'Updated fixture' }).expect(200);
     await call('delete', `/users/${id}`, 'admin').expect(200);
     expect((await db.user.findUniqueOrThrow({ where: { user_id: id } })).is_active).toBe(false);
@@ -195,12 +226,14 @@ describe('Frontend HTTP contracts', () => {
     await call('post', '/categories', 'admin').send(payload).expect(409);
     await call('get', '/categories', 'admin').expect(200);
     await call('get', `/categories/${id}`, 'admin').expect(200);
+    await call('patch', `/categories/${id}`, 'admin').send({ name: null }).expect(400);
     await call('patch', `/categories/${id}`, 'admin').send({ description: 'New description' }).expect(200);
     const sub = await call('post', '/subcategories', 'admin').send({ name: 'Subcategory', categoryId: id }).expect(201);
     const subPath = `/subcategories/${sub.body.data.id}`;
     const list = await call('get', `/subcategories?categoryId=${id}`, 'admin').expect(200);
     expect(list.body.data.map(row => row.id)).toContain(sub.body.data.id);
     await call('get', subPath, 'admin').expect(200);
+    await call('patch', subPath, 'admin').send({ name: null }).expect(400);
     await call('patch', subPath, 'admin').send({ name: 'Renamed subcategory' }).expect(200);
     await call('delete', subPath, 'admin').expect(200);
     await call('delete', `/categories/${id}`, 'admin').expect(200);
@@ -220,11 +253,21 @@ describe('Frontend HTTP contracts', () => {
     stores.push(storeId);
     const ownerStores = await call('get', '/stores/my-stores', 'owner').expect(200);
     expect(ownerStores.body.data.map(row => row.storeId)).toContain(storeId);
+    await call('patch', `/store-categories/${categoryId}`, 'admin').send({ nameAr: null }).expect(400);
+    await call('patch', `/stores/${storeId}`, 'owner').send({ storeNameAr: null }).expect(400);
+    const clearedStore = await call('patch', `/stores/${storeId}`, 'owner').send({ latitude: null, longitude: null }).expect(200);
+    expect(clearedStore.body.data).toMatchObject({ latitude: null, longitude: null });
+    await call('patch', `/stores/${storeId}`, 'owner').send({ latitude: 31.5, longitude: 34.45 }).expect(200);
     await call('patch', `/stores/${storeId}/moderation`, 'admin').send({ status: 'ACTIVE', expectedStatus: 'PENDING_APPROVAL', reason: 'Fixture approval' }).expect(200);
     await call('get', `/stores?categoryId=${categoryId}`, 'customer').expect(200);
     await call('get', '/stores/top-rated?limit=101', 'customer').expect(400);
     await call('get', '/stores/top-rated', 'customer').expect(200);
     await call('patch', `/stores/${storeId}/toggle-status`, 'owner').send({ isOpenNow: true }).expect(200);
+    await call('post', '/product-categories', 'customer').send({ storeId, nameAr: 'Denied' }).expect(403);
+    const adminPc = await call('post', '/product-categories', 'admin').send({ storeId, nameAr: 'Admin section' }).expect(201);
+    await call('patch', `/product-categories/${adminPc.body.data.prodCategoryId}`, 'admin').send({ nameAr: null }).expect(400);
+    await call('patch', `/product-categories/${adminPc.body.data.prodCategoryId}`, 'admin').send({ nameAr: 'Admin updated' }).expect(200);
+    await call('delete', `/product-categories/${adminPc.body.data.prodCategoryId}`, 'admin').expect(200);
     const pc = await call('post', '/product-categories', 'owner').send({ storeId, nameAr: 'Fixture products' }).expect(201);
     const prodCategoryId = pc.body.data.prodCategoryId;
     await call('get', `/product-categories?storeId=${storeId}`, 'customer').expect(200);
@@ -254,9 +297,28 @@ describe('Frontend HTTP contracts', () => {
     await call('get', `/products/${productId}`, 'customer').expect(200);
     const options = await call('get', `/products/${productId}/options`, 'customer').expect(200);
     expect(options.body.data).toHaveLength(1);
+    await call('post', `/products/${productId}/options`, 'stranger').send({ optionName: 'Forbidden' }).expect(403);
+    await call('post', `/products/${productId}/options`, 'customer').send({ optionName: 'Forbidden' }).expect(403);
+    await call('post', `/products/${productId}/options`, 'owner').send({ optionName: '   ' }).expect(400);
+    const createdOption = await call('post', `/products/${productId}/options`, 'owner')
+      .send({ optionName: 'Extra Cheese', optionNameAr: 'جبنة إضافية', extraCost: 3.5, isAvailable: true })
+      .expect(201);
+    const createdOptionId = createdOption.body.data.optionId;
+    expect(createdOption.body.data).toMatchObject({ productId, optionName: 'Extra Cheese', optionNameAr: 'جبنة إضافية', isAvailable: true });
+    await call('patch', `/products/${productId}/options/${createdOptionId}`, 'stranger').send({ isAvailable: false }).expect(403);
+    await call('patch', `/products/${productId}/options/${createdOptionId + 9999}`, 'owner').send({ isAvailable: false }).expect(404);
+    const updatedOption = await call('patch', `/products/${productId}/options/${createdOptionId}`, 'owner')
+      .send({ optionNameAr: null, extraCost: 4, isAvailable: false })
+      .expect(200);
+    expect(updatedOption.body.data).toMatchObject({ optionNameAr: null, isAvailable: false });
+    await call('patch', `/products/${productId}/options/${createdOptionId}`, 'admin').send({ isAvailable: true }).expect(200);
+    await call('delete', `/products/${productId}/options/${createdOptionId}`, 'stranger').expect(403);
+    await call('delete', `/products/${productId}/options/${createdOptionId + 9999}`, 'owner').expect(404);
+    await call('delete', `/products/${productId}/options/${createdOptionId}`, 'owner').expect(200);
     const search = await call('get', `/products/search/${storeId}?q=Fixture`, 'customer').expect(200);
     expect(search.body.data.map(row => row.productId)).toContain(productId);
     await call('get', `/products/search/${storeId}`, 'customer').expect(400);
+    await call('patch', `/products/${productId}`, 'owner').send({ nameAr: null }).expect(400);
     await call('patch', `/products/${productId}`, 'owner').send({ nameEn: 'Renamed fixture' }).expect(200);
     await call('patch', `/products/${productId}/toggle-availability`, 'owner').send({ isAvailable: false }).expect(200);
     const unavailable = await call('get', `/products/store/${storeId}`, 'customer').expect(200);
@@ -272,6 +334,7 @@ describe('Frontend HTTP contracts', () => {
       expect((await call('get', `/favorites/${kind}/check/${id}`, 'stranger').expect(200)).body.data).toBe(false);
       await call('delete', `/favorites/${kind}/${id}`, 'customer').expect(200);
     }
+    await call('post', '/reviews', 'owner').send({ storeId, rating: 5, comment: 'Owner self review' }).expect(403);
     await call('post', '/reviews', 'customer').send({ storeId, rating: 6 }).expect(400);
     const review = await call('post', '/reviews', 'customer').send({ storeId, rating: 4, comment: 'Fixture review' }).expect(201);
     await call('get', `/reviews/store/${storeId}`, 'customer').expect(200);
@@ -283,6 +346,34 @@ describe('Frontend HTTP contracts', () => {
     stores.push(disposable.body.data.storeId);
     await call('delete', `/stores/${disposable.body.data.storeId}`, 'owner').expect(200);
     expect(await db.store.findUnique({ where: { storeId: disposable.body.data.storeId } })).toMatchObject({ status: 'INACTIVE' });
+  });
+
+  it.each([['stores', 'storeId'], ['products', 'productId']] as const)('paginates favorite %s while retaining page offsets', async (kind, key) => {
+    const category = await db.storeCategory.create({ data: { nameAr: `Favorite ${kind} pages ${tag}` } });
+    storeCategories.push(category.categoryId);
+    const fixtures: { storeId: number; productId: number }[] = [];
+    for (let index = 0; index < 2; index++) {
+      const store = await db.store.create({ data: {
+        ownerId: users[1], categoryId: category.categoryId, areaId: 1,
+        storeName: `Favorite page ${index}`, status: 'ACTIVE',
+      } });
+      stores.push(store.storeId);
+      const product = await db.product.create({ data: { storeId: store.storeId, nameAr: `Favorite item ${index}` } });
+      fixtures.push({ storeId: store.storeId, productId: product.productId });
+    }
+    const [first, latest] = fixtures.map(row => row[key]);
+    const path = `/favorites/${kind}`;
+    await call('post', `${path}/${first}`, 'customer').expect(201);
+    await call('post', `${path}/${latest}`, 'customer').expect(201);
+    const readPage = async (query: string, actor = 'customer') =>
+      (await call('get', `${path}?${query}`, actor).expect(200)).body.data.map(row => row[key]);
+    expect(await readPage('page=1&limit=1')).toEqual([latest]);
+    expect(await readPage('page=1&limit=1&lookahead=1')).toEqual([latest, first]);
+    expect(await readPage('page=2&limit=1&lookahead=1')).toEqual([first]);
+    expect(await readPage('page=1&limit=1&lookahead=1', 'stranger')).toEqual([]);
+    await call('get', `${path}?lookahead=2`, 'customer').expect(400);
+    await call('delete', `${path}/${first}`, 'customer').expect(200);
+    await call('delete', `${path}/${latest}`, 'customer').expect(200);
   });
 
   it('persists onboarding and upserts one default address across concurrent retries', async () => {
@@ -330,6 +421,8 @@ describe('Frontend HTTP contracts', () => {
     await call('put', path, 'customer').send({ ...payload, label: 'Work' }).expect(200);
     const addresses = await call('get', '/addresses?limit=1', 'customer').expect(200);
     expect(addresses.body.data[0].label).toBe('Work');
+    await call('get', '/orders?before=0', 'customer').expect(400);
+    await call('get', '/notifications?before=0', 'customer').expect(400);
     const orders = await call('get', '/orders', 'customer').expect(200);
     expect(orders.body.data).toEqual({ orders: [], nextBefore: null });
     await call('get', '/notifications/sms-queue', 'customer').expect(403);

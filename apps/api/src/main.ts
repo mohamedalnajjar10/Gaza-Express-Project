@@ -1,6 +1,6 @@
 import { observeRequest } from './common/request-observability';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
@@ -9,10 +9,11 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { GlobalExceptionFilter } from './common/filters/prisma-exception.filter';
 
 async function bootstrap() {
+  const isProduction = process.env.NODE_ENV === 'production';
   const app = await NestFactory.create(AppModule, {
     bufferLogs: true,
     rawBody: true, // Enable buffering for better log management
-    logger: ['error', 'warn', 'log', 'debug', 'verbose'],
+    logger: isProduction ? ['error', 'warn', 'log'] : ['error', 'warn', 'log', 'debug', 'verbose'],
   });
 
   const configService = app.get(ConfigService);
@@ -69,22 +70,26 @@ async function bootstrap() {
     maxAge: 3600,
   });
 
-  // Swagger documentation
-  const config = new DocumentBuilder()
-    .setTitle('Gaza Express API')
-    .setDescription('Comprehensive Gaza Express API Documentation')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .build();
+  // Swagger documentation (disabled in production)
+  if (!isProduction) {
+    const config = new DocumentBuilder()
+      .setTitle('Gaza Express API')
+      .setDescription('Comprehensive Gaza Express API Documentation')
+      .setVersion('1.0')
+      .addBearerAuth()
+      .build();
 
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup(`${apiPrefix}/docs`, app, document);
-
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup(`${apiPrefix}/docs`, app, document);
+  }
 
   const port = configService.get('PORT', 8090);
   await app.listen(port);
 
-  console.log(`🚀 Gaza Express API running on: http://localhost:${port}/api/v1`);
-  console.log(`📚 API Documentation: http://localhost:${port}/${apiPrefix}/docs`);
+  const logger = new Logger('Bootstrap');
+  logger.log(`Gaza Express API running on port ${port} (prefix: /${apiPrefix})`);
+  if (!isProduction) {
+    logger.log(`API Documentation: http://localhost:${port}/${apiPrefix}/docs`);
+  }
 }
 bootstrap();

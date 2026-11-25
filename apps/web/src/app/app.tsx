@@ -1,4 +1,4 @@
-import { lazy } from 'react';
+import { lazy, Suspense } from 'react';
 import {
   BrowserRouter,
   Link,
@@ -10,9 +10,15 @@ import {
 } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { IdentityProvider, useIdentity } from '../shared/auth/identity';
+import { Busy } from '../shared/ui/feedback';
 import { Layout } from './layout';
 import CatalogPage from '../features/catalog/catalog-page';
-import { DriverLocationProvider } from '../features/operations/driver-location';
+
+const DriverLocationProvider = lazy(() =>
+  import('../features/driver/driver-location').then(module => ({
+    default: module.DriverLocationProvider,
+  })),
+);
 
 const StorePage = lazy(() => import('../features/catalog/store-page'));
 const Auth = lazy(() => import('../features/auth/auth-page'));
@@ -31,12 +37,15 @@ const Operations = lazy(() => import('../features/operations/operations-page'));
 function Protected() {
   const { profile } = useIdentity();
   const location = useLocation();
-  if (!profile) return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
+  const from = location.pathname + location.search + location.hash;
+  if (!profile) return <Navigate to="/login" replace state={{ from }} />;
   if (profile.role === 'customer' && profile.addressPromptedAt === null && location.pathname !== '/addresses' && location.pathname !== '/checkout') {
-    return <Navigate to="/addresses" replace state={{ from: location.pathname + location.search, fromState: location.state, onboarding: true }} />;
+    return <Navigate to="/addresses" replace state={{ from, fromState: location.state, onboarding: true }} />;
   }
   return profile.role === 'driver' ? (
-    <DriverLocationProvider key={profile.user_id}><Outlet /></DriverLocationProvider>
+    <Suspense fallback={<Busy />}>
+      <DriverLocationProvider key={profile.user_id}><Outlet /></DriverLocationProvider>
+    </Suspense>
   ) : <Outlet />;
 }
 

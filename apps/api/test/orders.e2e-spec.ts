@@ -1,3 +1,4 @@
+import * as bcrypt from 'bcrypt';
 import { trackEndpoints } from './track-endpoints';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -5,14 +6,15 @@ import { Test } from '@nestjs/testing';
 import { UserRole } from '@prisma/client';
 import { createHmac, randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
+import sharp from 'sharp';
 import request from 'supertest';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppModule } from '../src/app.module';
 import { RedisStorage } from '../src/infrastructure/redis.module';
 
 const actors = {
-  customer: 'customer', stranger: 'customer', owner: 'store_owner', driver: 'driver', otherDriver: 'driver', admin: 'admin',
-  near: 'driver', far: 'driver', areaDriver: 'driver', companyDriver: 'driver', manager: 'store_owner', recoveryManager: 'store_owner',
+  suspect: 'customer', customer: 'customer', prepaidBuyer: 'customer', stranger: 'customer', owner: 'store_owner', driver: 'driver', otherDriver: 'driver', bizDriver: 'driver', admin: 'admin',
+  near: 'driver', far: 'driver', areaDriver: 'driver', companyDriver: 'driver', manager: 'store_owner', recoveryManager: 'store_owner', bizManager: 'store_owner',
 } satisfies Record<string, UserRole>;
 type Actor = keyof typeof actors;
 
@@ -26,9 +28,9 @@ describe('Order lifecycle on MySQL', () => {
     request(app.getHttpServer())[method](`/api/v1${path}`).auth(user(actor).token, { type: 'bearer' });
   const addressData = { label: 'Home', address: 'Test delivery address', latitude: 31.5, longitude: 34.45 };
   const address = (actor: Actor = 'customer', data = addressData) => api(actor, 'post', '/addresses').send(data).expect(201);
-  const cart = async () => {
-    const current = await api('customer', 'get', '/cart').expect(200);
-    return api('customer', 'put', '/cart').send({ version: current.body.version, items: [{ productId, quantity: 2, optionIds: [optionId] }] }).expect(200);
+  const cart = async (actor: Actor = 'customer') => {
+    const current = await api(actor, 'get', '/cart').expect(200);
+    return api(actor, 'put', '/cart').send({ version: current.body.version, items: [{ productId, quantity: 2, optionIds: [optionId] }] }).expect(200);
   };
   const checkout = (addressId: number, cartVersion: number, key = randomUUID()) =>
     api('customer', 'post', '/orders').set('Idempotency-Key', key).send({ addressId, cartVersion });
@@ -166,6 +168,8 @@ describe('Order lifecycle on MySQL', () => {
     const proof = await api('customer', 'get', `/orders/${first.body.id}/delivery-code`).expect(200);
     const wrongCode = proof.body.code === '000000' ? '111111' : '000000';
     await act('driver', pickedUp.body, 'deliver', { deliveryCode: wrongCode, collectedAmount: 26 }).expect(400);
+    expect(await db.customerOrder.findUnique({ where: { id: first.body.id }, select: { deliveryCodeAttempts: true } }))
+      .toEqual({ deliveryCodeAttempts: 1 });
     await act('driver', pickedUp.body, 'deliver', { deliveryCode: proof.body.code, collectedAmount: 25 }).expect(400);
     const outcomes = await Promise.all([0, 1].map(() => act('driver', pickedUp.body, 'deliver', { deliveryCode: proof.body.code, collectedAmount: 26 })));
     expect(outcomes.map(response => response.status).sort()).toEqual([200, 200]);
@@ -185,6 +189,8 @@ describe('Order lifecycle on MySQL', () => {
     try {
       const bestSellers = await api('customer', 'get', `/products/store/${storeId}/best-sellers`).expect(200);
       expect(bestSellers.body.map(product => product.productId)).toEqual([productId]);
+      expect(bestSellers.body[0]).not.toHaveProperty('soldQuantity');
+      expect(bestSellers.body[0].estimatedPriceMin).toBe('5');
     } finally {
       await db.product.delete({ where: { productId: unsold.productId } });
     }
@@ -227,7 +233,7 @@ describe('Order lifecycle on MySQL', () => {
     }
   });
 
-  it('requires a signed WhatsApp message and an independent statement reconciliation for bank transfers', async () => {
+  it('requires a private receipt and statement reconciliation even after a signed WhatsApp message', async () => {
     const savedAddress = await address();
     const savedCart = await cart();
     const order = await api('customer', 'post', '/orders').set('Idempotency-Key', randomUUID())
@@ -248,12 +254,158 @@ describe('Order lifecycle on MySQL', () => {
     await hook(signature).expect(200);
     expect((await api('customer', 'get', `/orders/${order.body.id}/payment`).expect(200)).body).toMatchObject({ status: 'DUE', whatsappReceived: true });
     await reconcile('customer').expect(403);
+    await reconcile('admin').expect(409);
+    const receiptPath = `/orders/${order.body.id}/payment/receipt`;
+    expect(payment.body.recipientPhone).toBe('0592229436');
+    const png = await sharp({ create: { width: 16, height: 16, channels: 3, background: 'white' } }).png().toBuffer();
+    await api('stranger', 'post', receiptPath).attach('image', png, 'receipt.png').expect(404);
+    await api('customer', 'post', receiptPath).attach('image', Buffer.from('bad'), 'fake.png').expect(400);
+    await api('customer', 'post', receiptPath).attach('image', png, 'receipt.png').expect(201);
+    await api('owner', 'get', receiptPath).expect(200).expect('Content-Type', /image/);
+    await api('stranger', 'get', receiptPath).expect(404);
+    await api('owner','post', receiptPath + '/report').send({ reason: 'Reference not found' }).expect(201);
+    await reconcile('admin').expect(409);
+    await api('owner','post', receiptPath + '/review').send({decision:'suspend'}).expect(403);
+    await api('admin','post', receiptPath + '/review').send({decision:'dismiss'}).expect(201);
+    await reconcile('owner').expect(403);
     await reconcile('admin', 25).expect(400);
     await reconcile('admin').expect(200);
     await reconcile('admin').expect(200);
     expect((await db.customerOrder.findUniqueOrThrow({ where: { id: order.body.id } })).dispatchOpenedAt).toBeInstanceOf(Date);
     expect(await db.paymentEntry.count({ where: { orderId: order.body.id, kind: 'COLLECTION' } })).toBe(1);
     await act('owner', accepted.body, 'ready').expect(200);
+  });
+
+  it('freezes the store recipient, holds disputed transfers and lets only an admin suspend the reported customer', async () => {
+    const phone = '0561234567';
+    await api('owner', 'patch', `/stores/${storeId}`).send({ bankTransferPhone: phone }).expect(200);
+    try {
+      const shipping = await address('suspect');
+      const basket = await cart('suspect');
+      const order = await api('suspect','post','/orders').set('Idempotency-Key', randomUUID())
+        .send({ addressId: shipping.body.id, cartVersion: basket.body.version, paymentMethod: 'BANK_TRANSFER' }).expect(201);
+      const quote = await act('owner', order.body, 'quote', { total: 26 }).expect(200);
+      await act('suspect', quote.body, 'approve_quote').expect(200);
+      const path = `/orders/${order.body.id}/payment`;
+      await api('owner', 'patch', `/stores/${storeId}`).send({ bankTransferPhone: null }).expect(200);
+      expect((await api('owner','get',path)).body).toMatchObject({ recipientPhone: phone, storeCollected: true });
+      const png = await sharp({create:{width:4,height:4,channels:3,background:'white'}}).png().toBuffer();
+      await api('suspect','post',path+'/receipt').attach('image',png,'receipt.png').expect(201);
+      await api('owner','post',path+'/receipt/report').send({reason:'Statement mismatch'}).expect(201);
+      await api('suspect','get','/auth/profile').expect(200);
+      await api('admin','post',path+'/receipt/review').send({decision:'suspend'}).expect(201);
+      await api('suspect','get','/auth/profile').expect(401);
+      await api('owner','post',path+'/bank-reconciliation').send({amount:26,currency:'ILS',reference:randomUUID()}).expect(409);
+      expect((await api('admin','get',path)).body.status).toBe('DUE');
+    } finally {
+      await db.store.update({where:{storeId},data:{bankTransferPhone:null}});
+    }
+  });
+
+  it('analyzes receipt tampering and duplicates, surfaces fraud reports to admins, and supports account suspension/restoration', async () => {
+    const fraudTag = randomUUID().slice(0, 8);
+    const fraudPass = 'TestPass123!';
+    const fraudPhone = `059${String(Math.floor(1000000 + Math.random() * 8999999))}`;
+    const fraudAccount = await db.user.create({
+      data: {
+        phone: fraudPhone,
+        full_name: `fraud-${fraudTag}`,
+        password_hash: await bcrypt.hash(fraudPass, 4),
+        role: 'customer',
+        is_verified: true,
+      },
+    });
+    const jwt = app.get(JwtService);
+    const fraudToken = jwt.sign({ sub: fraudAccount.user_id, role: 'customer', phone: fraudAccount.phone, isActive: true, sessionVersion: 0 });
+    const fraudApi = (method: 'get' | 'post' | 'put' | 'patch' | 'delete', path: string) =>
+      request(app.getHttpServer())[method](`/api/v1${path}`).auth(fraudToken, { type: 'bearer' });
+
+    try {
+      const basePng = await sharp({
+        create: { width: 320, height: 480, channels: 3, background: { r: 245, g: 248, b: 246 } },
+      })
+        .composite([{
+          input: await sharp({ create: { width: 180, height: 80, channels: 3, background: { r: 18, g: 91, b: 65 } } }).png().toBuffer(),
+          top: 40,
+          left: 70,
+        }])
+        .png()
+        .toBuffer();
+      const tamperedPng = injectPngTextChunk(basePng, 'Software', 'Canva');
+
+      const shipping = await fraudApi('post', '/addresses').send(addressData).expect(201);
+      const cart1 = await fraudApi('get', '/cart').expect(200);
+      const put1 = await fraudApi('put', '/cart').send({ version: cart1.body.version, items: [{ productId, quantity: 2, optionIds: [optionId] }] }).expect(200);
+      const order1 = await fraudApi('post', '/orders').set('Idempotency-Key', randomUUID())
+        .send({ addressId: shipping.body.id, cartVersion: put1.body.version, paymentMethod: 'BANK_TRANSFER' }).expect(201);
+      const quote1 = await act('owner', order1.body, 'quote', { total: 26 }).expect(200);
+      await fraudApi('patch', `/orders/${quote1.body.id}/status`).send({ action: 'approve_quote', version: quote1.body.version }).expect(200);
+
+      const path1 = `/orders/${order1.body.id}/payment`;
+      await fraudApi('post', path1 + '/receipt')
+        .field('claimedAmount', '10')
+        .attach('image', tamperedPng, 'tampered.png')
+        .expect(400);
+
+      const upload1 = await fraudApi('post', path1 + '/receipt')
+        .field('transferReference', `BOP-TEST-${fraudTag}`)
+        .field('senderPhone', '0599887766')
+        .field('claimedAmount', '26')
+        .attach('image', tamperedPng, 'tampered.png')
+        .expect(201);
+      expect(upload1.body).toMatchObject({
+        submitted: true,
+        verificationStatus: 'FLAGGED_SUSPICIOUS',
+        riskLevel: 'HIGH',
+      });
+      expect(upload1.body).not.toHaveProperty('forensicReport');
+
+      const cart2 = await fraudApi('get', '/cart').expect(200);
+      const put2 = await fraudApi('put', '/cart').send({ version: cart2.body.version, items: [{ productId, quantity: 2, optionIds: [optionId] }] }).expect(200);
+      const order2 = await fraudApi('post', '/orders').set('Idempotency-Key', randomUUID())
+        .send({ addressId: shipping.body.id, cartVersion: put2.body.version, paymentMethod: 'BANK_TRANSFER' }).expect(201);
+      const quote2 = await act('owner', order2.body, 'quote', { total: 26 }).expect(200);
+      const accepted2 = await fraudApi('patch', `/orders/${quote2.body.id}/status`).send({ action: 'approve_quote', version: quote2.body.version }).expect(200);
+      await fraudApi('patch', `/orders/${accepted2.body.id}/status`).send({ action: 'cancel', version: accepted2.body.version, reason: 'Testing post-cancel fraud' }).expect(200);
+
+      const path2 = `/orders/${order2.body.id}/payment`;
+      const upload2 = await fraudApi('post', path2 + '/receipt')
+        .field('transferReference', `BOP-TEST-${fraudTag}`)
+        .attach('image', tamperedPng, 'duplicate.png')
+        .expect(201);
+      expect(upload2.body).toMatchObject({
+        submitted: true,
+        verificationStatus: 'FLAGGED_SUSPICIOUS',
+        riskLevel: 'HIGH',
+      });
+      expect(upload2.body).not.toHaveProperty('forensicReport');
+
+      await api('owner', 'post', path2 + '/receipt/report').send({ reason: 'Duplicate forged receipt' }).expect(201);
+      await api('owner', 'get', '/finance/receipt-reports').expect(403);
+      const queue = await api('admin', 'get', '/finance/receipt-reports?status=reported').expect(200);
+      expect(queue.body.items.some((item: { orderId: number }) => item.orderId === order2.body.id)).toBe(true);
+
+      const suspicious = await api('admin', 'get', '/finance/receipt-reports?status=suspicious').expect(200);
+      expect(suspicious.body.items.some((item: { orderId: number }) => item.orderId === order1.body.id)).toBe(true);
+
+      await api('admin', 'post', path1 + '/receipt/review').send({ decision: 'suspend', note: 'Verified fake receipt' }).expect(201);
+      await api('admin', 'post', path1 + '/bank-reconciliation')
+        .send({ amount: 26, currency: 'ILS', reference: randomUUID() }).expect(409);
+      await fraudApi('get', '/auth/profile').expect(401);
+      await request(app.getHttpServer()).post('/api/v1/auth/login').send({ phone: fraudPhone, password: fraudPass }).expect(403);
+
+      await api('admin', 'patch', `/users/${fraudAccount.user_id}`).send({ is_active: true }).expect(200);
+      // Pre-suspension JWT stays invalid due to incremented sessionVersion, while fresh login succeeds.
+      await fraudApi('get', '/auth/profile').expect(401);
+      const relogin = await request(app.getHttpServer()).post('/api/v1/auth/login').send({ phone: fraudPhone, password: fraudPass }).expect(200);
+      await request(app.getHttpServer()).get('/api/v1/auth/profile').auth(relogin.body.tokens.access_token, { type: 'bearer' }).expect(200);
+    } finally {
+      await db.paymentEntry.deleteMany({ where: { payment: { order: { customerId: fraudAccount.user_id } } } });
+      await db.payment.deleteMany({ where: { order: { customerId: fraudAccount.user_id } } });
+      await db.orderEvent.deleteMany({ where: { order: { customerId: fraudAccount.user_id } } });
+      await db.customerOrder.deleteMany({ where: { customerId: fraudAccount.user_id } });
+      await db.user.delete({ where: { user_id: fraudAccount.user_id } });
+    }
   });
 
   it('records late electronic sandbox confirmation as refund-required on a cancelled order', async () => {
@@ -508,4 +660,291 @@ describe('Order lifecycle on MySQL', () => {
       await api('owner', 'get', `/orders/${submitted.id}`).expect(200);
     } finally { controller.abort(); }
   });
+
+  it('applies tiered commissions, store PRO discount, distance delivery fees, company fees, and financial summaries', async () => {
+    const config = app.get(ConfigService);
+    const company = (await api('admin', 'post', '/delivery-companies').send({
+      name: 'Express Fleet Co', managerId: user('bizManager').id, feePerOrder: 1.5,
+    }).expect(201)).body;
+    expect(company.feePerOrder).toBe('1.5');
+    const updatedCompany = (await api('admin', 'patch', `/delivery-companies/${company.id}`).send({ feePerOrder: 2.0 }).expect(200)).body;
+    expect(updatedCompany.feePerOrder).toBe('2');
+    await api('customer', 'patch', `/delivery-companies/${company.id}`).send({ feePerOrder: 5 }).expect(403);
+    await api('admin', 'put', `/stores/${storeId}/delivery-contracts/${company.id}`).expect(204);
+
+    // 1. Admin sets category commission (600 bps = 6%); non-admin rejected
+    await api('owner', 'patch', `/store-categories/${categoryId}`).send({ defaultCommissionBps: 600 }).expect(403);
+    const updatedCat = (await api('admin', 'patch', `/store-categories/${categoryId}`).send({ defaultCommissionBps: 600 }).expect(200)).body;
+    expect(updatedCat.defaultCommissionBps).toBe(600);
+
+    // 2. Owner sets store delivery pricing; mass-assignment of planTier/commissionBps on PATCH /stores/:id is blocked
+    await api('owner', 'patch', `/stores/${storeId}`).send({ planTier: 'PRO' }).expect(400);
+    await api('owner', 'patch', `/stores/${storeId}`).send({ commissionBps: 100 }).expect(400);
+    await api('owner', 'patch', `/stores/${storeId}`).send({
+      deliveryBaseFee: 4, deliveryPerKmFee: 1.5, freeDeliveryThreshold: 100,
+    }).expect(200);
+
+    // 3. Delivery quote endpoint (~2 km north of store at 31.518, 34.45)
+    const distantAddress = (await address('customer', { ...addressData, latitude: 31.518, longitude: 34.45 })).body;
+    const paidQuote = (await api('customer', 'get', `/orders/delivery-quote?storeId=${storeId}&addressId=${distantAddress.id}&itemsSubtotal=26`).expect(200)).body;
+    expect(Number(paidQuote.deliveryDistanceKm)).toBeGreaterThan(1.5);
+    expect(Number(paidQuote.deliveryFee)).toBeGreaterThan(4);
+    expect(paidQuote.freeDeliveryApplied).toBe(false);
+    expect(paidQuote.withinRange).toBe(true);
+
+    const freeQuote = (await api('customer', 'get', `/orders/delivery-quote?storeId=${storeId}&addressId=${distantAddress.id}&itemsSubtotal=100`).expect(200)).body;
+    expect(freeQuote.freeDeliveryApplied).toBe(true);
+    expect(freeQuote.deliveryFee).toBe('0.00');
+
+    // 4. Checkout below threshold -> snapshot deliveryFee, category 6% commission, company 2.00 fee, platform delivery cut
+    config.set('DELIVERY_PLATFORM_CUT_BPS', '1000'); // 10% platform margin on delivery fee
+    config.set('PRO_COMMISSION_DISCOUNT_BPS', '150');
+    try {
+      const basket1 = await cart();
+      const order1 = (await api('customer', 'post', '/orders').set('Idempotency-Key', randomUUID()).send({
+        addressId: distantAddress.id, cartVersion: basket1.body.version, paymentMethod: 'CASH',
+      }).expect(201)).body;
+      const expectedDeliveryFee = paidQuote.deliveryFee;
+      expect(Number(order1.deliveryFee).toFixed(2)).toBe(expectedDeliveryFee);
+      expect(order1.rewardPointsEarned).toBe(10);
+
+      const quoted1 = (await act('owner', order1, 'quote', { total: 26, deliveryCompanyId: company.id }).expect(200)).body;
+      const accepted1 = (await act('customer', quoted1, 'approve_quote').expect(200)).body;
+      expect(Number(accepted1.finalTotal)).toBeCloseTo(26 + Number(expectedDeliveryFee), 2);
+
+      const payment1 = (await api('admin', 'get', `/orders/${order1.id}/payment`).expect(200)).body;
+      expect(payment1.commissionBpsApplied).toBe(600);
+      expect(payment1.companyFeeApplied).toBe('2');
+      const total1 = Number(payment1.storeShare) + Number(payment1.driverShare) + Number(payment1.platformShare);
+      expect(total1).toBeCloseTo(Number(payment1.amount), 2);
+      // Items commission on 26 = 1.56; company fee = 2.00; deliveryMargin = 10% of deliveryFee
+      const deliveryMargin = Number((Number(expectedDeliveryFee) * 0.1).toFixed(2));
+      expect(Number(payment1.platformShare)).toBeCloseTo(1.56 + 2.0 + deliveryMargin, 2);
+      expect(Number(payment1.driverShare)).toBeCloseTo(Number(expectedDeliveryFee) - deliveryMargin, 2);
+      expect(Number(payment1.storeShare)).toBeCloseTo(26 - 1.56 - 2.0, 2);
+
+      // 5. Admin upgrades store to PRO (600 - 150 = 450 bps effective) and merchant summary + platform summary work
+      await api('customer', 'patch', `/stores/${storeId}/monetization`).send({ planTier: 'PRO' }).expect(403);
+      const proStore = (await api('admin', 'patch', `/stores/${storeId}/monetization`).send({ planTier: 'PRO', commissionBps: null }).expect(200)).body;
+      expect(proStore.planTier).toBe('PRO');
+
+      // Free delivery threshold met when store lowers threshold to 24
+      await api('owner', 'patch', `/stores/${storeId}`).send({ freeDeliveryThreshold: 24 }).expect(200);
+      const basket2 = await cart();
+      const order2 = (await api('customer', 'post', '/orders').set('Idempotency-Key', randomUUID()).send({
+        addressId: distantAddress.id, cartVersion: basket2.body.version, paymentMethod: 'CASH',
+      }).expect(201)).body;
+      expect(Number(order2.deliveryFee)).toBe(0);
+      const quoted2 = (await act('owner', order2, 'quote', { total: 26, deliveryCompanyId: null }).expect(200)).body;
+      const accepted2 = (await act('customer', quoted2, 'approve_quote').expect(200)).body;
+      const payment2 = (await api('admin', 'get', `/orders/${order2.id}/payment`).expect(200)).body;
+      expect(payment2.commissionBpsApplied).toBe(450); // 600 - 150 PRO discount
+      expect(Number(payment2.platformShare)).toBeCloseTo(26 * 0.045, 2);
+      expect(Number(payment2.storeShare)).toBeCloseTo(26 - Number(payment2.platformShare), 2);
+      await act('customer', accepted2, 'cancel', { reason: 'Cleanup pro order' }).expect(200);
+      await act('customer', accepted1, 'cancel', { reason: 'Cleanup paid delivery order' }).expect(200);
+
+      // 6. Merchant & platform summaries enforce roles and return analytics
+      await api('customer', 'get', '/finance/merchant-summary').expect(403);
+      const merchantSummary = (await api('owner', 'get', '/finance/merchant-summary').expect(200)).body;
+      expect(merchantSummary.stores.find((s: { storeId: number }) => s.storeId === storeId)).toMatchObject({
+        planTier: 'PRO',
+        effectiveCommissionBps: 450,
+      });
+
+      await api('owner', 'get', '/finance/platform-summary').expect(403);
+      const platformSummary = (await api('admin', 'get', '/finance/platform-summary').expect(200)).body;
+      expect(platformSummary.totals.proStores).toBeGreaterThanOrEqual(1);
+      expect(platformSummary.categories.some((c: { categoryId: number; defaultCommissionBps: number | null }) => c.categoryId === categoryId && c.defaultCommissionBps === 600)).toBe(true);
+    } finally {
+      config.set('DELIVERY_PLATFORM_CUT_BPS', '0');
+      config.set('PRO_COMMISSION_DISCOUNT_BPS', '0');
+      await api('admin', 'patch', `/stores/${storeId}/monetization`).send({ planTier: 'FREE', commissionBps: null }).expect(200);
+      await api('owner', 'patch', `/stores/${storeId}`).send({ deliveryBaseFee: null, deliveryPerKmFee: null, freeDeliveryThreshold: null }).expect(200);
+      await api('admin', 'patch', `/store-categories/${categoryId}`).send({ defaultCommissionBps: null }).expect(200);
+    }
+  });
+
+  it('awards 20 double loyalty points for delivered Bank of Palestine orders', async () => {
+    const shipping = (await address('prepaidBuyer')).body;
+    const basket = await cart('prepaidBuyer');
+    const created = (await api('prepaidBuyer', 'post', '/orders').set('Idempotency-Key', randomUUID()).send({
+      addressId: shipping.id, cartVersion: basket.body.version, paymentMethod: 'BANK_TRANSFER',
+    }).expect(201)).body;
+    expect(created.rewardPointsEarned).toBe(20);
+
+    const quoted = (await act('owner', created, 'quote', { total: 26 }).expect(200)).body;
+    const accepted = (await act('prepaidBuyer', quoted, 'approve_quote').expect(200)).body;
+
+    // Distinct high-entropy PNG so receipt forensics treats it as clean unique proof
+    const w = 480;
+    const h = 360;
+    const pixels = Buffer.alloc(w * h * 3);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = (y * w + x) * 3;
+        pixels[idx] = (x * 13 + y * 7) % 256;
+        pixels[idx + 1] = (x * 3 + y * 19) % 256;
+        pixels[idx + 2] = (x * 29 + y * 5) % 256;
+      }
+    }
+    const cleanReceipt = await sharp(pixels, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+    await api('prepaidBuyer', 'post', `/orders/${created.id}/payment/receipt`)
+      .field('transferReference', `BOP-${randomUUID().slice(0, 8)}`)
+      .field('senderPhone', '0591234567')
+      .field('claimedAmount', '26')
+      .attach('image', cleanReceipt, { filename: 'clean-receipt.png', contentType: 'image/png' })
+      .expect(201);
+
+    await api('admin', 'post', `/orders/${created.id}/payment/bank-reconciliation`).send({
+      amount: 26, currency: 'ILS', reference: `BANK-${randomUUID().slice(0, 8)}`,
+    }).expect(200);
+
+    const refreshed = (await api('owner', 'get', `/orders/${created.id}`).expect(200)).body;
+    const ready = (await act('owner', refreshed, 'ready').expect(200)).body;
+    await db.customerOrder.update({ where: { id: created.id }, data: { dispatchOpenedAt: new Date(Date.now() - 46_000) } });
+    await api('admin', 'patch', `/drivers/${user('bizDriver').id}/approval`).send({ approved: true }).expect(200);
+    await api('bizDriver', 'patch', '/drivers/me/availability').send({ available: true, dispatchAreaId: 1 }).expect(200);
+    await api('bizDriver', 'put', '/drivers/me/location').send({ latitude: 31.5, longitude: 34.45 }).expect(204);
+    const claimed = (await act('bizDriver', ready, 'claim_delivery').expect(200)).body;
+    const inTransit = (await act('bizDriver', claimed, 'pick_up').expect(200)).body;
+    const code = (await api('prepaidBuyer', 'get', `/orders/${created.id}/delivery-code`).expect(200)).body.code;
+    await act('bizDriver', inTransit, 'deliver', { deliveryCode: code }).expect(200);
+
+    const rewardsRes = (await api('prepaidBuyer', 'get', '/rewards').expect(200)).body;
+    expect(rewardsRes).toMatchObject({ balance: 20, pointsPerOrder: 10, bankTransferPointsPerOrder: 20 });
+
+    const ownerSummary = (await api('owner', 'get', '/finance/merchant-summary').expect(200)).body;
+    expect(ownerSummary.totals.deliveredOrders).toBeGreaterThanOrEqual(1);
+    expect(Number(ownerSummary.totals.grossSales)).toBeGreaterThan(0);
+
+    const adminSummary = (await api('admin', 'get', '/finance/platform-summary').expect(200)).body;
+    expect(adminSummary.totals.deliveredOrders).toBeGreaterThanOrEqual(1);
+    expect(Number(adminSummary.totals.grossMerchandiseValue)).toBeGreaterThan(0);
+  });
+
+  it('recalculates deliveryFee on QUOTE and APPROVE_QUOTE when total crosses freeDeliveryThreshold and rejects ?before=0', async () => {
+    await api('customer', 'get', '/orders?before=0').expect(400);
+    await api('customer', 'get', '/notifications?before=0').expect(400);
+    await api('owner', 'patch', `/stores/${storeId}`).send({
+      deliveryBaseFee: 4, deliveryPerKmFee: 1.5, freeDeliveryThreshold: 50,
+    }).expect(200);
+    try {
+      const distantAddress = (await address('customer', { ...addressData, latitude: 31.518, longitude: 34.45 })).body;
+      const basket = await cart();
+      const order = (await checkout(distantAddress.id, basket.body.version).expect(201)).body;
+      expect(Number(order.deliveryFee)).toBeGreaterThan(4);
+
+      const quotedFree = (await act('owner', order, 'quote', { total: 60 }).expect(200)).body;
+      expect(Number(quotedFree.deliveryFee)).toBe(0);
+
+      const quotedPaid = (await act('owner', quotedFree, 'quote', { total: 30 }).expect(200)).body;
+      expect(Number(quotedPaid.deliveryFee)).toBeGreaterThan(4);
+
+      const quotedThreshold = (await act('owner', quotedPaid, 'quote', { total: 55 }).expect(200)).body;
+      expect(Number(quotedThreshold.deliveryFee)).toBe(0);
+
+      const accepted = (await act('customer', quotedThreshold, 'approve_quote').expect(200)).body;
+      expect(Number(accepted.deliveryFee)).toBe(0);
+      expect(accepted.finalTotal).toBe('55');
+      const payment = (await api('admin', 'get', `/orders/${order.id}/payment`).expect(200)).body;
+      expect(Number(payment.deliveryFee)).toBe(0);
+      expect(payment.amount).toBe('55');
+      await act('customer', accepted, 'cancel', { reason: 'Cleanup threshold test' }).expect(200);
+    } finally {
+      await api('owner', 'patch', `/stores/${storeId}`).send({
+        deliveryBaseFee: null, deliveryPerKmFee: null, freeDeliveryThreshold: null,
+      }).expect(200);
+    }
+  });
+
+  it('allows admin fraud reporting on platform receipts and rejects bank reconciliation on FLAGGED_SUSPICIOUS receipts until dismissed', async () => {
+    const buildReceiptPng = async (seed: number) => {
+      const w = 480;
+      const h = 360;
+      const pixels = Buffer.alloc(w * h * 3);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const idx = (y * w + x) * 3;
+          const band = seed % 2 === 0 ? Math.floor(x / 48) + Math.floor(y / 45) : Math.floor(x / 30) * 3 - Math.floor(y / 60);
+          const bright = (band + seed) % 2 === 0 ? 235 : 35;
+          pixels[idx] = (bright + ((x * seed) % 40)) % 256;
+          pixels[idx + 1] = (bright + ((y * (seed + 3)) % 40)) % 256;
+          pixels[idx + 2] = (bright + (((x + y) * seed) % 40)) % 256;
+        }
+      }
+      return sharp(pixels, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+    };
+
+    const shipping = (await address('prepaidBuyer')).body;
+    const createBankOrder = async () => {
+      const basket = await cart('prepaidBuyer');
+      const created = (await api('prepaidBuyer', 'post', '/orders').set('Idempotency-Key', randomUUID()).send({
+        addressId: shipping.id, cartVersion: basket.body.version, paymentMethod: 'BANK_TRANSFER',
+      }).expect(201)).body;
+      const quoted = (await act('owner', created, 'quote', { total: 26 }).expect(200)).body;
+      return (await api('prepaidBuyer', 'patch', `/orders/${quoted.id}/status`).send({
+        action: 'approve_quote', version: quoted.version,
+      }).expect(200)).body;
+    };
+
+    // 1. Platform receipt: admin reports fraud -> blocks reconciliation until admin dismisses
+    const platformOrder = await createBankOrder();
+    const cleanPng = await buildReceiptPng(11);
+    await api('prepaidBuyer', 'post', `/orders/${platformOrder.id}/payment/receipt`)
+      .field('transferReference', `BOP-ADMIN-${randomUUID().slice(0, 8)}`)
+      .attach('image', cleanPng, { filename: 'platform-receipt.png', contentType: 'image/png' })
+      .expect(201);
+    await api('admin', 'post', `/orders/${platformOrder.id}/payment/receipt/report`)
+      .send({ reason: 'Missing from platform bank statement' })
+      .expect(201);
+    await api('admin', 'post', `/orders/${platformOrder.id}/payment/bank-reconciliation`)
+      .send({ amount: 26, currency: 'ILS', reference: `RECON-${randomUUID().slice(0, 8)}` })
+      .expect(409);
+    await api('admin', 'post', `/orders/${platformOrder.id}/payment/receipt/review`)
+      .send({ decision: 'dismiss', note: 'Verified late statement entry' })
+      .expect(201);
+    await api('admin', 'post', `/orders/${platformOrder.id}/payment/bank-reconciliation`)
+      .send({ amount: 26, currency: 'ILS', reference: `RECON-${randomUUID().slice(0, 8)}` })
+      .expect(200, { status: 'PAID' });
+
+    // 2. Auto-flagged suspicious receipt: reconciliation blocked (409) until admin dismisses without prior report
+    const suspiciousOrder = await createBankOrder();
+    const suspiciousPng = injectPngTextChunk(await buildReceiptPng(29), 'Software', 'Canva');
+    const upload = await api('prepaidBuyer', 'post', `/orders/${suspiciousOrder.id}/payment/receipt`)
+      .field('transferReference', `BOP-SUSP-${randomUUID().slice(0, 8)}`)
+      .attach('image', suspiciousPng, { filename: 'suspicious-receipt.png', contentType: 'image/png' })
+      .expect(201);
+    expect(upload.body.verificationStatus).toBe('FLAGGED_SUSPICIOUS');
+
+    await api('admin', 'post', `/orders/${suspiciousOrder.id}/payment/bank-reconciliation`)
+      .send({ amount: 26, currency: 'ILS', reference: `RECON-${randomUUID().slice(0, 8)}` })
+      .expect(409);
+    await api('admin', 'post', `/orders/${suspiciousOrder.id}/payment/receipt/review`)
+      .send({ decision: 'dismiss', note: 'Verified genuine bank transfer' })
+      .expect(201);
+    await api('admin', 'post', `/orders/${suspiciousOrder.id}/payment/bank-reconciliation`)
+      .send({ amount: 26, currency: 'ILS', reference: `RECON-${randomUUID().slice(0, 8)}` })
+      .expect(200, { status: 'PAID' });
+  });
 });
+
+function crc32(buffer: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function injectPngTextChunk(png: Buffer, keyword: string, value: string): Buffer {
+  const payload = Buffer.concat([Buffer.from(keyword, 'latin1'), Buffer.from([0]), Buffer.from(value, 'latin1')]);
+  const typeAndData = Buffer.concat([Buffer.from('tEXt', 'ascii'), payload]);
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(payload.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(typeAndData), 0);
+  const chunk = Buffer.concat([len, typeAndData, crc]);
+  return Buffer.concat([png.subarray(0, png.length - 12), chunk, png.subarray(png.length - 12)]);
+}

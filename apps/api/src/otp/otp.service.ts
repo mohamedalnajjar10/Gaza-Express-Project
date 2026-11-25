@@ -1,9 +1,10 @@
 import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { OtpType, Prisma } from '@prisma/client';
+import { OtpType, Prisma, UserRole } from '@prisma/client';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from 'prisma/prisma.service';
 import { AUTH_CONSTANTS } from '../auth/constants/auth.constants';
+import type { RegistrationRole } from '../auth/dto/register.dto';
 import { hashOTP } from '../common/utils/crypto.util';
 import { generateOTP } from '../common/utils/otp-generator.util';
 import { SmsService } from '../sms/sms.service';
@@ -19,7 +20,7 @@ export class OtpService {
     private readonly config: ConfigService,
   ) {}
 
-  async sendSignup(phone: string, createPending: boolean): Promise<void> {
+  async sendSignup(phone: string, createPending: boolean, role?: RegistrationRole): Promise<void> {
     if (!['twilio', 'fake'].includes(this.config.get('SMS_PROVIDER', 'disabled'))) {
       throw new ServiceUnavailableException('Verification is unavailable');
     }
@@ -32,14 +33,20 @@ export class OtpService {
       }
       const user = await this.lockUser(tx, phone);
       if (!user?.is_active || user.is_verified || user.role === 'admin') return;
-      await this.issue(tx, phone, OtpType.PHONE_VERIFICATION, user.user_id);
+      const issued = await this.issue(tx, phone, OtpType.PHONE_VERIFICATION, user.user_id);
+      if (issued !== undefined && role) {
+        await tx.user.update({ where: { user_id: user.user_id }, data: { pendingSignupRole: role } });
+      }
     });
   }
 
   async sendOtp(phone: string, type: OtpType, userId?: number): Promise<number> {
     return this.prisma.$transaction(async tx => {
       const user = await this.lockUser(tx, phone);
-      if (!user || (userId !== undefined && user.user_id !== userId)) {
+      if (!user || !user.is_active || (userId !== undefined && user.user_id !== userId)) {
+        throw new BadRequestException('Account unavailable');
+      }
+      if (type !== OtpType.PHONE_VERIFICATION && (!user.is_verified || user.role === 'admin')) {
         throw new BadRequestException('Account unavailable');
       }
       const issued = await this.issue(tx, phone, type, user.user_id);
@@ -56,11 +63,13 @@ export class OtpService {
     phone: string,
     code: string,
     purpose: OtpType,
-    consume: (tx: Tx, userId: number) => Promise<T>,
+    consume: (tx: Tx, userId: number, pendingRole: UserRole | null) => Promise<T>,
   ): Promise<T> {
     const result = await this.prisma.$transaction(async tx => {
       const user = await this.lockUser(tx, phone);
-      if (!user?.is_active || user.is_verified || user.role === 'admin') return null;
+      if (!user?.is_active || user.role === 'admin') return null;
+      if (purpose === OtpType.PHONE_VERIFICATION && user.is_verified) return null;
+      if (purpose !== OtpType.PHONE_VERIFICATION && !user.is_verified) return null;
       const otp = await tx.otpCode.findFirst({
         where: { user_id: user.user_id, phone, type: purpose, challenge: { not: null }, is_used: false, expires_at: { gt: new Date() } },
         orderBy: { otp_id: 'desc' },
@@ -72,7 +81,7 @@ export class OtpService {
         return null;
       }
       await tx.otpCode.update({ where: { otp_id: otp.otp_id }, data: { is_used: true } });
-      return consume(tx, user.user_id);
+      return consume(tx, user.user_id, user.pendingSignupRole);
     });
     if (result === null) throw invalidCode();
     return result;
@@ -83,7 +92,7 @@ export class OtpService {
     if (!row) return null;
     return tx.user.findUnique({
       where: { user_id: row.user_id },
-      select: { user_id: true, is_active: true, is_verified: true, role: true },
+      select: { user_id: true, is_active: true, is_verified: true, role: true, pendingSignupRole: true },
     });
   }
 

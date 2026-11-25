@@ -6,6 +6,9 @@ export class ProductListDto extends PageDto {
   @IsIn(['true', 'false'])
   availableOnly = 'true';
 
+  @IsOptional() @IsIn(['1'])
+  lookahead?: '1';
+
   @Type(() => Number) @IsOptional() @IsInt() @Min(1)
   categoryId?: number;
 

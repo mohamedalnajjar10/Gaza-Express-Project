@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useState, type FormEvent, type FormEventHandler, type ReactNode } from 'react';
 import { ErrorBox } from './feedback';
 
 export function ActionForm({
@@ -47,12 +47,15 @@ export function Field({
   required?: boolean;
   autoComplete?: string;
   defaultValue?: string;
+  readOnly?: boolean;
   min?: number;
   max?: number;
   step?: string;
+  minLength?: number;
   maxLength?: number;
   inputMode?: 'numeric' | 'tel' | 'decimal';
   pattern?: string;
+  onInput?: FormEventHandler<HTMLInputElement>;
 }) {
   return (
     <label>

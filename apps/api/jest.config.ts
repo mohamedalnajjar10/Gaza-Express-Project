@@ -1,3 +1,7 @@
+if (process.versions.node.split('.')[0] !== '22') {
+    throw new Error(`Backend unit tests require Node.js 22.x. Current version: ${process.version}. Switch to Node 22 and retry.`);
+}
+
 export default {
     moduleFileExtensions: ['js', 'json', 'ts'],
     rootDir: '.',

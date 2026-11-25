@@ -1,4 +1,5 @@
 export type Store = {
+  bankTransferPhone?: string | null;
   storeId: number;
   storeName: string;
   storeNameAr?: string;
@@ -8,7 +9,14 @@ export type Store = {
   isOpenNow: boolean;
   avgRating: string;
   estimatedPrepMin: number;
-  storeCategory?: { nameAr: string };
+  deliveryRangeKm?: string | number;
+  minOrderAmount?: string | number;
+  planTier?: 'FREE' | 'PRO';
+  commissionBps?: number | null;
+  deliveryBaseFee?: string | number | null;
+  deliveryPerKmFee?: string | number | null;
+  freeDeliveryThreshold?: string | number | null;
+  storeCategory?: { nameAr: string; defaultCommissionBps?: number | null };
 };
 export type Option = {
   optionId: number;

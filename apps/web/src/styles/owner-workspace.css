@@ -261,6 +261,7 @@
 .owner-store-card {
   position: relative;
   padding: 24px;
+  transition: border-color .18s ease, box-shadow .18s ease;
 }
 .owner-store-top {
   display: flex;
@@ -299,6 +300,47 @@
 }
 .owner-store-category {
   font-size: 0.8rem;
+}
+.owner-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.plan-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: #eef0ee;
+  color: #536158;
+}
+.plan-badge.is-pro {
+  background: #e5f3ea;
+  color: #155c32;
+  border: 1px solid #96cba9;
+}
+.business-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.business-kpis article {
+  display: grid;
+  gap: 6px;
+}
+.business-kpis span {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.business-kpis strong {
+  font-size: 1.35rem;
+}
+.business-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  gap: 14px;
 }
 .owner-location {
   display: flex;
@@ -351,6 +393,16 @@
 }
 .owner-store-card:has(details[open]) {
   grid-column: 1 / -1;
+  border-color: var(--workspace-accent);
+  box-shadow: 0 6px 20px #173f2d0d;
+}
+@keyframes ownerPanelReveal {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.owner-store-card > details[open] > :not(summary),
+.owner-product-grid .product-card > details[open] > :not(summary) {
+  animation: ownerPanelReveal .18s ease;
 }
 .owner-store-form > .form,
 .owner-products .form {
@@ -387,12 +439,32 @@
   font-weight: 400;
 }
 .owner-store-form .form > button,
+.owner-store-form .form > .owner-field-full,
 .owner-products .form > button,
 .owner-products .form > .split,
 .owner-products .form > small,
 .owner-products .form > .error,
 .owner-store-form .error {
   grid-column: 1 / -1;
+}
+.owner-field-full {
+  display: grid;
+  gap: 6px;
+}
+.owner-field-full small {
+  color: var(--muted);
+}
+.owner-bank-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: .8rem;
+  color: #214e3a;
+  background: #edf6ef;
+  border: 1px solid #d2e6d7;
+  border-radius: 8px;
+  padding: 8px 11px;
+  margin-block-end: 12px;
 }
 .owner-success {
   color: #24633c;
@@ -561,6 +633,9 @@
   }
 }
 @media (max-width: 520px) {
+  .owner-stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .owner-store-form > .form,
   .owner-products .form,
   .workspace--store_owner .owner-product-grid {
